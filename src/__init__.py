@@ -1,0 +1,1 @@
+"""Foundry Local Chat package."""

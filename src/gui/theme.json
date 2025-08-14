@@ -1,0 +1,72 @@
+{
+  "default": {
+    "main_app": {
+      "APP_BG": "#2d3748",
+      "BORDER": "#132242"
+    },
+    "app_top_bar": {
+      "TOPBAR_BG": "#1d242f",
+      "MODEL_BG": "#2a3446"
+    },
+    "chat_history": {
+      "SIDEBAR_BG": "#212938",
+      "CHAT_LIST_BG": "#2d3748",
+      "CHAT_LIST_ITEM_SELECTED_BG": "#183161"
+    },
+    "chat_area": {
+      "CHAT_OUTER_BG": "#212938",
+      "CHAT_INNER_BG": "#2d3748",
+      "BUBBLE_USER": "#183161",
+      "BUBBLE_AI": "#0F2347"
+    },
+    "typing_area": {
+      "TYPING_BAR_BG": "#2d3748",
+      "TYPING_BAR_OUTLINE": "#212938",
+      "TYPING_AREA_BG": "#212938"
+    },
+    "buttons": {
+      "NEWCHAT_BUTTON_BG": "#102A5A",
+      "DELETE_BUTTON_BG": "#8B1E1C",
+      "SEND_BG": "#23488F"
+    },
+    "text": {
+      "TEXT_PRIMARY": "#FFFFFF",
+      "TEXT_MUTED": "#8B949E"
+    }
+  },
+  "current": {
+    "main_app": {
+      "APP_BG": "#2d3748",
+      "BORDER": "#132242"
+    },
+    "app_top_bar": {
+      "TOPBAR_BG": "#1d242f",
+      "MODEL_BG": "#2a3446"
+    },
+    "chat_history": {
+      "SIDEBAR_BG": "#212938",
+      "CHAT_LIST_BG": "#2d3748",
+      "CHAT_LIST_ITEM_SELECTED_BG": "#183161"
+    },
+    "chat_area": {
+      "CHAT_OUTER_BG": "#212938",
+      "CHAT_INNER_BG": "#2d3748",
+      "BUBBLE_USER": "#183161",
+      "BUBBLE_AI": "#0F2347"
+    },
+    "typing_area": {
+      "TYPING_BAR_BG": "#2d3748",
+      "TYPING_BAR_OUTLINE": "#212938",
+      "TYPING_AREA_BG": "#212938"
+    },
+    "buttons": {
+      "NEWCHAT_BUTTON_BG": "#102A5A",
+      "DELETE_BUTTON_BG": "#8B1E1C",
+      "SEND_BG": "#23488F"
+    },
+    "text": {
+      "TEXT_PRIMARY": "#FFFFFF",
+      "TEXT_MUTED": "#8B949E"
+    }
+  }
+}
