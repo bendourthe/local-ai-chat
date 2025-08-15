@@ -1,6 +1,7 @@
+from collections import deque
 from datetime import datetime
 from typing import List, Dict, Optional
-from PySide6.QtCore import Qt, QObject, Signal, QSize, QEvent, QPoint, QRect
+from PySide6.QtCore import Qt, QObject, Signal, QSize, QEvent, QPoint, QRect, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QListWidget, QListWidgetItem, QToolBar, QComboBox, QPushButton, QLineEdit, QTextEdit, QToolButton, QStyle, QGraphicsDropShadowEffect, QSizePolicy, QMenu, QInputDialog, QStackedLayout, QStyleOption, QStyleOptionFrame, QProxyStyle, QAbstractItemView, QMessageBox, QScrollBar
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap
 from PySide6 import QtSvg
@@ -39,6 +40,16 @@ class MainWindow(QMainWindow):
         self._chat_started: bool = False
         self._bridge = _Bridge()
         self._bridge.assistant.connect(self._on_assistant)
+        self._typing = None  # {'timer':QTimer,'bubble':Bubble,'text':str,'index':int,'iso':str,'sticky':bool}
+        self._assistant_waiting: bool = False
+        self._typing_debounce = QTimer(self)
+        try:
+            self._typing_debounce.setSingleShot(True)
+        except Exception:
+            pass
+        # Track per-chat pending requests (refcount) and route responses
+        self._waiting_by_chat: Dict[str, int] = {}
+        self._inflight_queue = deque()  # type: deque[str]
         def _apply_small_shadow(w):
             """Apply a small drop shadow to a widget."""
             eff = QGraphicsDropShadowEffect(self)
@@ -397,9 +408,28 @@ class MainWindow(QMainWindow):
         if not items:
             return
         cid = items[0].data(Qt.UserRole)
+        prev_cid = self._current_chat
         data = storage.load_chat(cid)
         if not data:
             return
+        # If an animation was running in the previous chat, finalize and persist it
+        if prev_cid and self._typing and isinstance(self._typing, dict):
+            try:
+                tmr = self._typing.get('timer')
+                if tmr:
+                    tmr.stop()
+            except Exception:
+                pass
+            try:
+                s = self._typing.get('text', '')
+                iso = self._typing.get('iso') or datetime.now().isoformat()
+                prev_data = storage.load_chat(prev_cid) or {}
+                msgs = list(prev_data.get('messages', []))
+                msgs.append({'role':'assistant','content':s,'ts':iso})
+                storage.save_messages(prev_cid, msgs)
+            except Exception:
+                pass
+            self._typing = None
         self._current_chat = cid
         self._messages = data.get('messages', [])
         self.chat._v.setEnabled(False)
@@ -417,6 +447,19 @@ class MainWindow(QMainWindow):
             txt = m.get('content','')
             iso = m.get('ts')
             self.chat.add_message(role, txt, iso)
+        # Show or hide typing indicator based on per-chat waiting state
+        try:
+            if int(self._waiting_by_chat.get(cid, 0)) > 0:
+                sticky = False
+                try:
+                    sticky = bool(self.chat.is_at_bottom())
+                except Exception:
+                    sticky = False
+                self.chat.show_typing(sticky=sticky)
+            else:
+                self.chat.hide_typing()
+        except Exception:
+            pass
         self.chat._v.setEnabled(True)
     def _new_chat(self) -> None:
         cid = storage.create_chat('New Chat')
@@ -585,6 +628,12 @@ class MainWindow(QMainWindow):
         if self._current_chat == cid:
             self._current_chat = None
             self._messages = []
+            # Hide typing indicator when clearing current chat
+            self._assistant_waiting = False
+            try:
+                self.chat.hide_typing()
+            except Exception:
+                pass
             while self.chat._v.count() > 1:
                 w = self.chat._v.itemAt(0).widget()
                 if w:
@@ -592,6 +641,14 @@ class MainWindow(QMainWindow):
                 self.chat._v.removeItem(self.chat._v.itemAt(0))
             try:
                 self.chat.reset_day_groups()
+            except Exception:
+                pass
+            # Clear per-chat waiting/inflight state
+            try:
+                if cid in self._waiting_by_chat:
+                    self._waiting_by_chat.pop(cid, None)
+                if cid in self._inflight_queue:
+                    self._inflight_queue.remove(cid)
             except Exception:
                 pass
         self._load_chats()
@@ -614,6 +671,15 @@ class MainWindow(QMainWindow):
                 self.chat._v.removeItem(self.chat._v.itemAt(0))
             try:
                 self.chat.reset_day_groups()
+            except Exception:
+                pass
+            # Clear per-chat waiting/inflight state
+            try:
+                for cid in ids:
+                    if cid in self._waiting_by_chat:
+                        self._waiting_by_chat.pop(cid, None)
+                if self._inflight_queue:
+                    self._inflight_queue = deque([x for x in self._inflight_queue if x not in set(ids)])
             except Exception:
                 pass
         self._load_chats()
@@ -727,12 +793,47 @@ class MainWindow(QMainWindow):
         txt = self.entry.toPlainText().strip()
         if not txt or not self._current_chat:
             return
+        origin_cid = self._current_chat
         self.entry.clear()
         now_iso = datetime.now().isoformat()
         self.chat.add_message('user', txt, now_iso)
         self._messages.append({'role':'user','content':txt,'ts':now_iso})
         storage.save_messages(self._current_chat, self._messages)
         self._ensure_chat_started()
+        # Debounce typing indicator (show if assistant not yet responded after 300ms)
+        self._assistant_waiting = True
+        try:
+            self._inflight_queue.append(origin_cid)
+        except Exception:
+            pass
+        try:
+            self._waiting_by_chat[origin_cid] = int(self._waiting_by_chat.get(origin_cid, 0)) + 1
+        except Exception:
+            pass
+        def _fire_typing() -> None:
+            # Only show in the originating chat if still waiting and user is viewing it
+            if int(self._waiting_by_chat.get(origin_cid, 0)) <= 0:
+                return
+            if self._current_chat != origin_cid:
+                return
+            sticky = False
+            try:
+                sticky = bool(self.chat.is_at_bottom())
+            except Exception:
+                sticky = False
+            try:
+                self.chat.show_typing(sticky=sticky)
+            except Exception:
+                pass
+        try:
+            self._typing_debounce.timeout.disconnect()
+        except Exception:
+            pass
+        self._typing_debounce.timeout.connect(_fire_typing)
+        try:
+            self._typing_debounce.start(300)
+        except Exception:
+            pass
         try:
             self._cli.send_prompt(txt)
         except Exception:
@@ -760,10 +861,92 @@ class MainWindow(QMainWindow):
         dlg.themeChanged.connect(self._apply_theme)
         dlg.exec()
     def _on_assistant(self, text: str) -> None:
-        # Append assistant message to UI and storage
+        """Animate assistant reply with typing effect and save on completion."""
+        # Determine originating chat for this reply
+        try:
+            cid = self._inflight_queue.popleft()
+        except Exception:
+            cid = self._current_chat
+        if cid is None:
+            return
+        # Clear waiting refcount for that chat (decrement)
+        remaining = 0
+        try:
+            if cid in self._waiting_by_chat:
+                self._waiting_by_chat[cid] = max(0, int(self._waiting_by_chat.get(cid, 0)) - 1)
+                remaining = int(self._waiting_by_chat.get(cid, 0))
+                if self._waiting_by_chat[cid] <= 0:
+                    self._waiting_by_chat.pop(cid, None)
+        except Exception:
+            remaining = 0
+        full = (text or '').strip()
         now_iso = datetime.now().isoformat()
-        self.chat.add_message('assistant', text.strip(), now_iso)
-        if self._current_chat is not None:
-            self._messages.append({'role':'assistant','content':text.strip(),'ts':now_iso})
-            storage.save_messages(self._current_chat, self._messages)
-
+        # If the reply is for the currently open chat, animate it in UI
+        if self._current_chat == cid:
+            # Stop typing indicator only if no other pending prompts for this chat
+            self._assistant_waiting = False
+            if remaining <= 0:
+                try:
+                    self.chat.hide_typing()
+                except Exception:
+                    pass
+            sticky = False
+            try:
+                sticky = bool(self.chat.is_at_bottom())
+            except Exception:
+                sticky = False
+            bubble = self.chat.add_message('assistant', '', now_iso)
+            if self._typing and isinstance(self._typing, dict):
+                try:
+                    tmr = self._typing.get('timer')
+                    if tmr:
+                        tmr.stop()
+                except Exception:
+                    pass
+                self._typing = None
+            timer = QTimer(self)
+            try:
+                timer.setInterval(16)
+            except Exception:
+                pass
+            state = {'timer': timer, 'bubble': bubble, 'text': full, 'index': 0, 'iso': now_iso, 'sticky': sticky}
+            def _tick() -> None:
+                idx = state['index']
+                s = state['text']
+                step = 2
+                if idx >= len(s):
+                    try:
+                        state['timer'].stop()
+                    except Exception:
+                        pass
+                    if self._current_chat is not None:
+                        try:
+                            self._messages.append({'role':'assistant','content':s,'ts':state['iso']})
+                            storage.save_messages(self._current_chat, self._messages)
+                        except Exception:
+                            pass
+                    self._typing = None
+                    return
+                nxt = min(len(s), idx + step)
+                try:
+                    state['bubble'].append_text(s[idx:nxt])
+                except Exception:
+                    pass
+                state['index'] = nxt
+                if state['sticky']:
+                    try:
+                        self.chat.scroll_to_bottom()
+                    except Exception:
+                        pass
+            timer.timeout.connect(_tick)
+            self._typing = state
+            timer.start()
+        else:
+            # Different chat: persist directly to that chat's storage
+            try:
+                data = storage.load_chat(cid) or {}
+                msgs = list(data.get('messages', []))
+                msgs.append({'role':'assistant','content':full,'ts':now_iso})
+                storage.save_messages(cid, msgs)
+            except Exception:
+                pass
