@@ -105,6 +105,30 @@ class FoundryCLI:
                 seen.add(token)
                 models.append(token)
         return models
+    def model_size_hint(self, name: str) -> Optional[str]:
+        """Return a best-effort size hint like '4.2 GB' for a model from `foundry model list`.
+
+        Tries to find a table row matching the alias or model id and extract an 'XX [KMG]B' token.
+        """
+        try:
+            cp = subprocess.run(["foundry", "model", "list"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', check=False, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except FileNotFoundError:
+            return None
+        target = name.strip().lower()
+        size_re = re.compile(r"(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB)", re.IGNORECASE)
+        for raw in (cp.stdout or '').splitlines():
+            s = raw.strip()
+            if not s or 'Model ID' in s or s.startswith('Alias'):
+                continue
+            if set(s) <= set('-─—_=· '):
+                continue
+            low = s.lower()
+            if target not in low:
+                continue
+            m = size_re.search(s)
+            if m:
+                return f"{m.group(1)} {m.group(2).upper()}"
+        return None
     def start_chat(self, model: str, on_raw_output: Optional[Callable[[str], None]] = None, on_assistant: Optional[Callable[[str], None]] = None) -> None:
         """
         Start an interactive chat session `foundry model run <model>` and begin reading stdout on a background thread.
@@ -250,6 +274,57 @@ class FoundryCLI:
         id_to_alias = {mid: a for a, mid in pairs}
         candidate = alias_to_id.get(name) or id_to_alias.get(name)
         if candidate and _rm(candidate):
+            return True
+        return False
+    def remove_cached_model_stream(self, name: str, on_output: Optional[Callable[[str], None]] = None) -> bool:
+        """Remove a cached model by id or alias while streaming CLI output to a callback."""
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+        def _emit(s: str) -> None:
+            try:
+                if on_output:
+                    on_output(s)
+            except Exception:
+                pass
+        def _rm_stream(target: str) -> bool:
+            cmds = [
+                ["foundry", "cache", "remove", "--yes", target],
+                ["foundry", "cache", "remove", "-y", target],
+                ["foundry", "cache", "remove", target],
+            ]
+            for cmd in cmds:
+                try:
+                    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, creationflags=flags)
+                except FileNotFoundError:
+                    return False
+                assert p.stdout is not None
+                try:
+                    for line in p.stdout:
+                        s = line.rstrip('\n')
+                        if s:
+                            _emit(s)
+                        # Best-effort: auto-confirm if we see a prompt
+                        try:
+                            if p.stdin and re.search(r"(y/n|yes/no|confirm)", s, re.IGNORECASE):
+                                p.stdin.write('y\n')
+                                p.stdin.flush()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    p.wait()
+                except Exception:
+                    pass
+                if p.returncode == 0:
+                    return True
+            return False
+        if _rm_stream(name):
+            return True
+        pairs = self.list_cached_pairs()
+        alias_to_id = {a: mid for a, mid in pairs}
+        id_to_alias = {mid: a for a, mid in pairs}
+        candidate = alias_to_id.get(name) or id_to_alias.get(name)
+        if candidate and _rm_stream(candidate):
             return True
         return False
     def ensure_model_downloaded(self, model: str, on_output: Optional[Callable[[str], None]] = None) -> bool:

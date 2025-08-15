@@ -1,8 +1,10 @@
 from collections import deque
 from datetime import datetime
 from typing import List, Dict, Optional
+import re
+import threading
 from PySide6.QtCore import Qt, QObject, Signal, QSize, QEvent, QPoint, QRect, QTimer
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QListWidget, QListWidgetItem, QToolBar, QComboBox, QPushButton, QLineEdit, QTextEdit, QToolButton, QStyle, QGraphicsDropShadowEffect, QSizePolicy, QMenu, QInputDialog, QStackedLayout, QStyleOption, QStyleOptionFrame, QProxyStyle, QAbstractItemView, QMessageBox, QScrollBar
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QListWidget, QListWidgetItem, QToolBar, QComboBox, QPushButton, QLineEdit, QTextEdit, QToolButton, QStyle, QGraphicsDropShadowEffect, QSizePolicy, QMenu, QInputDialog, QStackedLayout, QStyleOption, QStyleOptionFrame, QProxyStyle, QAbstractItemView, QMessageBox, QScrollBar, QProgressDialog, QProgressBar
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap
 from PySide6 import QtSvg
 from .styles import QSS, APP_BG, PANEL_BG, SIDEBAR_BG, ACCENT, TEXT, INPUT_BAR_BG, CHAT_AREA_BG
@@ -16,6 +18,10 @@ class _Bridge(QObject):
     """Signal bridge for cross-thread CLI callbacks."""
     assistant = Signal(str)
     raw = Signal(str)
+    dl_line = Signal(str)
+    dl_done = Signal(bool)
+    rm_line = Signal(str)
+    rm_done = Signal(bool)
 
 class MainWindow(QMainWindow):
     """Qt main window replicating the app with modern layout/colors."""
@@ -38,8 +44,35 @@ class MainWindow(QMainWindow):
         self._messages: List[Dict] = []
         self._model: Optional[str] = None
         self._chat_started: bool = False
+        self._models_populating: bool = False
         self._bridge = _Bridge()
         self._bridge.assistant.connect(self._on_assistant)
+        self._bridge.dl_line.connect(self._on_download_output)
+        self._bridge.dl_done.connect(self._on_download_done)
+        self._bridge.rm_line.connect(self._on_delete_output)
+        self._bridge.rm_done.connect(self._on_delete_done)
+        self._dl_dialog = None
+        self._dl_size_str: Optional[str] = None
+        self._dl_model: Optional[str] = None
+        self._dl_thread: Optional[threading.Thread] = None
+        self._dl_anim_timer = QTimer(self)
+        try:
+            self._dl_anim_timer.setInterval(120)
+        except Exception:
+            pass
+        try:
+            self._dl_anim_timer.timeout.connect(self._tick_download_anim)
+        except Exception:
+            pass
+        self._dl_anim_value: int = 0
+        self._dl_anim_dir: int = 1
+        self._dl_is_determinate: bool = False
+        self._dl_bytes_done: Optional[float] = None
+        self._dl_bytes_total: Optional[float] = None
+        self._rm_dialog = None
+        self._rm_model: Optional[str] = None
+        self._rm_thread: Optional[threading.Thread] = None
+        self._rm_counterpart: Optional[str] = None
         self._typing = None  # {'timer':QTimer,'bubble':Bubble,'text':str,'index':int,'iso':str,'sticky':bool}
         self._assistant_waiting: bool = False
         self._typing_debounce = QTimer(self)
@@ -685,46 +718,516 @@ class MainWindow(QMainWindow):
         self._load_chats()
     # --- Models ---
     def _refresh_models(self) -> None:
-        names = self._cli.list_models() or []
-        downloaded = storage.get_downloaded_models()
-        available = [n for n in names if n not in set(downloaded)]
-        self.model_combo.clear()
-        # Only show separator if both groups exist
-        if downloaded and available:
-            self.model_combo.addItems(downloaded)
-            self.model_combo.addItem('────────────')
-            self.model_combo.addItems(available)
-        elif downloaded:
-            self.model_combo.addItems(downloaded)
-        elif available:
-            self.model_combo.addItems(available)
-        else:
-            # Nothing to show; use placeholder when supported
+        self._models_populating = True
+        try:
+            names = self._cli.list_models() or []
+        except Exception:
+            names = []
+        # Merge downloaded registry with actual cache
+        try:
+            pairs = self._cli.list_cached_pairs()
+        except Exception:
+            pairs = []
+        try:
+            storage.migrate_downloaded_aliases(pairs)
+        except Exception:
+            pass
+        try:
+            reg = set(storage.get_downloaded_models())
+        except Exception:
+            reg = set()
+        cached_ids = {mid for _, mid in pairs}
+        downloaded_set = set(reg) | set(cached_ids)
+        # Persist union so UI stays in sync on next run
+        try:
+            if downloaded_set != reg:
+                storage.set_downloaded_models(sorted(downloaded_set))
+        except Exception:
+            pass
+        available = [n for n in names if n not in downloaded_set]
+        # Rebuild combo without emitting change signals
+        try:
+            self.model_combo.blockSignals(True)
+            self.model_combo.clear()
+            downloaded_list = sorted(downloaded_set)
+            if downloaded_list and available:
+                self.model_combo.addItems(downloaded_list)
+                self.model_combo.addItem('────────────')
+                self.model_combo.addItems(available)
+            elif downloaded_list:
+                self.model_combo.addItems(downloaded_list)
+            elif available:
+                self.model_combo.addItems(available)
+            else:
+                try:
+                    self.model_combo.setPlaceholderText('No models found')
+                except Exception:
+                    pass
+            # Selection policy: only preselect if there are downloaded models
+            if downloaded_list:
+                try:
+                    self.model_combo.setCurrentText(downloaded_list[0])
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.model_combo.setCurrentIndex(-1)
+                    self.model_combo.setPlaceholderText('Select a model')
+                except Exception:
+                    pass
+        finally:
             try:
-                self.model_combo.setPlaceholderText('No models found')
-                self.model_combo.setCurrentIndex(-1)
+                self.model_combo.blockSignals(False)
             except Exception:
-                self.model_combo.addItem('No models found')
-        # preselect first downloaded if any
-        if downloaded:
-            self.model_combo.setCurrentText(downloaded[0])
+                pass
+            self._models_populating = False
     def _delete_model(self) -> None:
         name = self.model_combo.currentText()
         if not name or '─' in name:
             return
-        self._cli.remove_cached_model(name)
-        self._refresh_models()
+        title = 'Confirm Delete Model'
+        msg = f'Are you sure you want to delete the model "{name}"?'
+        try:
+            resp = QMessageBox.question(self, title, msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        except Exception:
+            resp = QMessageBox.No
+        if resp != QMessageBox.Yes:
+            return
+        self._rm_model = name
+        # Resolve alias/id counterpart to clean registry later
+        self._rm_counterpart = None
+        try:
+            pairs = self._cli.list_cached_pairs()
+            alias_to_id = {a: mid for a, mid in pairs}
+            id_to_alias = {mid: a for a, mid in pairs}
+            self._rm_counterpart = alias_to_id.get(name) or id_to_alias.get(name)
+        except Exception:
+            self._rm_counterpart = None
+        # Build deletion progress dialog
+        try:
+            dlg = QProgressDialog(self)
+            dlg.setWindowTitle('Deletion in Progress...')
+            dlg.setCancelButton(None)
+            dlg.setRange(0, 0)
+            dlg.setValue(0)
+            dlg.setMinimumDuration(0)
+            dlg.setWindowModality(Qt.ApplicationModal)
+            dlg.setAutoClose(False)
+            dlg.setAutoReset(False)
+            label = f'Deleting {name} – preparing…'
+            dlg.setLabelText(label)
+            try:
+                dlg.setMinimumWidth(560)
+            except Exception:
+                pass
+            try:
+                lay = dlg.layout()
+                if lay:
+                    lay.setContentsMargins(12, 12, 12, 12)
+                    lay.setSpacing(8)
+            except Exception:
+                pass
+            try:
+                bar = dlg.findChild(QProgressBar)
+                if bar:
+                    bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                    bar.setMinimumHeight(18)
+            except Exception:
+                pass
+            try:
+                lbl = dlg.findChild(QLabel)
+                if lbl:
+                    lbl.setWordWrap(True)
+                    lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            except Exception:
+                pass
+            self._rm_dialog = dlg
+        except Exception:
+            self._rm_dialog = None
+        # Start background deletion with streamed output
+        def _runner() -> None:
+            ok = False
+            try:
+                ok = bool(self._cli.remove_cached_model_stream(name, on_output=lambda s: self._bridge.rm_line.emit(s)))
+            except Exception:
+                ok = False
+            try:
+                self._bridge.rm_done.emit(bool(ok))
+            except Exception:
+                pass
+        t = threading.Thread(target=_runner, daemon=True)
+        self._rm_thread = t
+        try:
+            t.start()
+        except Exception:
+            pass
+        try:
+            if self._rm_dialog is not None:
+                self._rm_dialog.show()
+        except Exception:
+            pass
     def _on_model_changed(self, s: str) -> None:
+        if getattr(self, '_models_populating', False):
+            return
         if not s or '─' in s:
             self._model = None
             return
         self._model = s
+        # If model isn't downloaded, prompt to download with progress
+        try:
+            downloaded = set(storage.get_downloaded_models())
+        except Exception:
+            downloaded = set()
+        if s not in downloaded:
+            try:
+                self._start_download_model(s)
+            except Exception:
+                pass
         # stop any running chat on model change
         try:
             self._cli.stop_chat()
         except Exception:
             pass
         self._chat_started = False
+    def _start_download_model(self, model: str) -> None:
+        title = 'Download Required'
+        size_hint = None
+        try:
+            size_hint = self._cli.model_size_hint(model)
+        except Exception:
+            size_hint = None
+        if size_hint:
+            msg = (
+                f'The selected model "{model}" is not downloaded.\n\n'
+                f'Estimated size: {size_hint}.\n\n'
+                'Do you want to proceed with the download?'
+            )
+        else:
+            msg = (
+                f'The selected model "{model}" is not downloaded.\n\n'
+                'It will be fetched and may require additional disk space.\n\n'
+                'Do you want to proceed with the download?'
+            )
+        try:
+            resp = QMessageBox.question(self, title, msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        except Exception:
+            resp = QMessageBox.No
+        if resp != QMessageBox.Yes:
+            return
+        self._dl_model = model
+        if size_hint:
+            self._dl_size_str = size_hint
+        try:
+            dlg = QProgressDialog(self)
+            dlg.setWindowTitle('Download in Progress...')
+            dlg.setCancelButton(None)
+            dlg.setRange(0, 0)
+            dlg.setValue(0)
+            dlg.setMinimumDuration(0)
+            dlg.setWindowModality(Qt.ApplicationModal)
+            dlg.setAutoClose(False)
+            dlg.setAutoReset(False)
+            label = f'Downloading {model}'
+            if self._dl_size_str:
+                label += f' ({self._dl_size_str})'
+            dlg.setLabelText(label)
+            try:
+                dlg.setMinimumWidth(560)
+            except Exception:
+                pass
+            try:
+                lay = dlg.layout()
+                if lay:
+                    lay.setContentsMargins(12, 12, 12, 12)
+                    lay.setSpacing(8)
+            except Exception:
+                pass
+            try:
+                bar = dlg.findChild(QProgressBar)
+                if bar:
+                    bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                    bar.setMinimumHeight(18)
+            except Exception:
+                pass
+            try:
+                lbl = dlg.findChild(QLabel)
+                if lbl:
+                    lbl.setWordWrap(True)
+                    lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            except Exception:
+                pass
+            self._dl_dialog = dlg
+        except Exception:
+            self._dl_dialog = None
+        # Start in indeterminate (busy) mode; switch to determinate when we detect percent/ratio
+        self._dl_is_determinate = False
+        self._dl_anim_value = 0
+        self._dl_anim_dir = 1
+        self._dl_bytes_done = None
+        self._dl_bytes_total = None
+        try:
+            if self._dl_size_str:
+                m = re.match(r"(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)", self._dl_size_str, re.IGNORECASE)
+                if m:
+                    unit = m.group(2).upper()
+                    v = float(m.group(1))
+                    mul = {"KB":1024.0, "MB":1024.0**2, "GB":1024.0**3, "TB":1024.0**4, "KIB":1024.0, "MIB":1024.0**2, "GIB":1024.0**3, "TIB":1024.0**4}
+                    self._dl_bytes_total = v * mul.get(unit, 1.0)
+        except Exception:
+            pass
+        def _runner() -> None:
+            ok = self._cli.ensure_model_downloaded(model, on_output=lambda s: self._bridge.dl_line.emit(s))
+            try:
+                self._bridge.dl_done.emit(bool(ok))
+            except Exception:
+                pass
+        t = threading.Thread(target=_runner, daemon=True)
+        self._dl_thread = t
+        try:
+            t.start()
+        except Exception:
+            pass
+        try:
+            if self._dl_dialog is not None:
+                self._dl_dialog.show()
+        except Exception:
+            pass
+        try:
+            if not self._dl_is_determinate and not self._dl_anim_timer.isActive():
+                self._dl_anim_timer.start()
+        except Exception:
+            pass
+    def _on_download_output(self, line: str) -> None:
+        dlg = self._dl_dialog
+        model = self._dl_model or ''
+        if not dlg:
+            return
+        text = (line or '').strip()
+        if not self._dl_size_str:
+            try:
+                m = re.search(r"(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)", text, re.IGNORECASE)
+                if m:
+                    self._dl_size_str = f"{m.group(1)} {m.group(2).upper()}"
+            except Exception:
+                pass
+        try:
+            pct = None
+            mp = re.search(r"(\d{1,3})(?:\.\d+)?\s*%", text)
+            if mp:
+                try:
+                    pct = max(0, min(100, int(float(mp.group(1)))))
+                except Exception:
+                    pct = None
+            if pct is None:
+                size_re = re.compile(r"(\d+(?:[\.,]\d+)?)\s*(K|M|G|T|Ki|Mi|Gi|Ti)?(?:B(?!/s)|[Bb]ytes?)", re.IGNORECASE)
+                vals: list[float] = []
+                for m in size_re.finditer(text):
+                    try:
+                        num = m.group(1)
+                        num = num.replace(',', '.')
+                        v = float(num)
+                    except Exception:
+                        continue
+                    unit = (m.group(2) or '').lower()
+                    if unit in ('k', 'ki'):
+                        v *= 1024.0
+                    elif unit in ('m', 'mi'):
+                        v *= 1024.0**2
+                    elif unit in ('g', 'gi'):
+                        v *= 1024.0**3
+                    elif unit in ('t', 'ti'):
+                        v *= 1024.0**4
+                    vals.append(v)
+                done_b = None
+                total_b = None
+                cand = None
+                for i in range(len(vals) - 1):
+                    if vals[i+1] >= vals[i]:
+                        cand = (vals[i], vals[i+1])
+                        break
+                if not cand and len(vals) >= 2:
+                    cand = (vals[-2], vals[-1])
+                if cand:
+                    done_b, total_b = cand
+                elif len(vals) == 1 and self._dl_bytes_total:
+                    done_b = vals[0]
+                    total_b = self._dl_bytes_total
+                if total_b and total_b > 0 and done_b is not None:
+                    try:
+                        pct = max(0, min(100, int((done_b / total_b) * 100)))
+                        self._dl_bytes_done = done_b
+                        self._dl_bytes_total = total_b
+                    except Exception:
+                        pct = None
+                elif self._dl_size_str and self._dl_bytes_total is None:
+                    try:
+                        m2 = re.match(r"(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)", self._dl_size_str, re.IGNORECASE)
+                        if m2:
+                            unit = m2.group(2).upper()
+                            v = float(m2.group(1))
+                            mul = {"KB":1024.0, "MB":1024.0**2, "GB":1024.0**3, "TB":1024.0**4, "KIB":1024.0, "MIB":1024.0**2, "GIB":1024.0**3, "TIB":1024.0**4}
+                            self._dl_bytes_total = v * mul.get(unit, 1.0)
+                    except Exception:
+                        pass
+            if pct is not None:
+                try:
+                    if dlg.maximum() == 0:
+                        dlg.setRange(0, 100)
+                except Exception:
+                    pass
+                self._dl_is_determinate = True
+                try:
+                    if self._dl_anim_timer.isActive():
+                        self._dl_anim_timer.stop()
+                except Exception:
+                    pass
+                dlg.setValue(pct)
+            label = f'Downloading {model}'
+            if self._dl_bytes_done is not None and self._dl_bytes_total:
+                def _fmt_bytes(b: float) -> str:
+                    u = ['B', 'KB', 'MB', 'GB', 'TB']
+                    v = float(b)
+                    i = 0
+                    while v >= 1024.0 and i < 4:
+                        v /= 1024.0
+                        i += 1
+                    return f"{v:.1f} {u[i]}"
+                try:
+                    label += f" – {_fmt_bytes(self._dl_bytes_done)} / {_fmt_bytes(self._dl_bytes_total)}"
+                except Exception:
+                    pass
+            elif self._dl_size_str:
+                label += f' ({self._dl_size_str})'
+            low = text.lower()
+            if 'verifying' in low:
+                label += ' – verifying…'
+            elif 'extracting' in low:
+                label += ' – extracting…'
+            elif 'downloading' in low or 'fetching' in low:
+                label += ' – downloading…'
+            dlg.setLabelText(label)
+        except Exception:
+            pass
+    def _on_download_done(self, ok: bool) -> None:
+        try:
+            if self._dl_dialog is not None:
+                self._dl_dialog.close()
+        except Exception:
+            pass
+        model = self._dl_model or ''
+        self._dl_dialog = None
+        self._dl_thread = None
+        try:
+            if self._dl_anim_timer.isActive():
+                self._dl_anim_timer.stop()
+        except Exception:
+            pass
+        self._dl_is_determinate = False
+        self._dl_anim_value = 0
+        self._dl_anim_dir = 1
+        try:
+            if ok:
+                try:
+                    storage.add_downloaded_model(model)
+                except Exception:
+                    pass
+                try:
+                    pairs = self._cli.list_cached_pairs()
+                    storage.migrate_downloaded_aliases(pairs)
+                except Exception:
+                    pass
+                try:
+                    self._refresh_models()
+                    self.model_combo.setCurrentText(model)
+                except Exception:
+                    pass
+                try:
+                    QMessageBox.information(self, 'Download Complete', f'Model "{model}" was downloaded successfully.')
+                except Exception:
+                    pass
+            else:
+                try:
+                    QMessageBox.warning(self, 'Download Failed', f'Failed to download model "{model}".')
+                except Exception:
+                    pass
+        finally:
+            self._dl_size_str = None
+            self._dl_model = None
+    def _tick_download_anim(self) -> None:
+        """Animate the download progress bar when no percentage is available."""
+        dlg = self._dl_dialog
+        if not dlg or self._dl_is_determinate:
+            return
+        try:
+            if not (dlg.minimum() == 0 and dlg.maximum() == 0):
+                dlg.setRange(0, 0)
+        except Exception:
+            pass
+    def _on_delete_output(self, line: str) -> None:
+        dlg = self._rm_dialog
+        model = self._rm_model or ''
+        if not dlg:
+            return
+        text = (line or '').strip()
+        try:
+            pct = None
+            mp = re.search(r"(\d{1,3})%", text)
+            if mp:
+                pct = max(0, min(100, int(mp.group(1))))
+            if pct is not None:
+                try:
+                    if dlg.maximum() == 0:
+                        dlg.setRange(0, 100)
+                except Exception:
+                    pass
+                dlg.setValue(pct)
+            label = f'Deleting {model}'
+            low = text.lower()
+            if 'verifying' in low:
+                label += ' – verifying…'
+            elif 'removing' in low or 'deleting' in low:
+                label += ' – removing…'
+            elif 'cleaning' in low or 'purging' in low:
+                label += ' – cleaning…'
+            dlg.setLabelText(label)
+        except Exception:
+            pass
+    def _on_delete_done(self, ok: bool) -> None:
+        try:
+            if self._rm_dialog is not None:
+                self._rm_dialog.close()
+        except Exception:
+            pass
+        name = self._rm_model or ''
+        counterpart = self._rm_counterpart
+        self._rm_dialog = None
+        self._rm_thread = None
+        try:
+            if ok:
+                try:
+                    storage.remove_downloaded_model(name)
+                    if counterpart and counterpart != name:
+                        storage.remove_downloaded_model(counterpart)
+                except Exception:
+                    pass
+                try:
+                    self._refresh_models()
+                except Exception:
+                    pass
+                try:
+                    QMessageBox.information(self, 'Deletion Complete', f'Model "{name}" was successfully removed.')
+                except Exception:
+                    pass
+            else:
+                try:
+                    QMessageBox.warning(self, 'Deletion Failed', f'Failed to remove "{name}" from cache.')
+                except Exception:
+                    pass
+        finally:
+            self._rm_model = None
+            self._rm_counterpart = None
     def _on_entry_changed(self) -> None:
         active = bool(self.entry.toPlainText().strip())
         if hasattr(self, 'send_btn') and self.send_btn is not None:
