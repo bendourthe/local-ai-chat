@@ -80,6 +80,8 @@ class MainWindow(QMainWindow):
             self._typing_debounce.setSingleShot(True)
         except Exception:
             pass
+        # Track the currently connected timeout slot so we can disconnect it safely
+        self._typing_fire_slot = None
         # Track per-chat pending requests (refcount) and route responses
         self._waiting_by_chat: Dict[str, int] = {}
         self._inflight_queue = deque()  # type: deque[str]
@@ -410,7 +412,7 @@ class MainWindow(QMainWindow):
             btn.setMenu(menu)
             btn.setPopupMode(QToolButton.InstantPopup)
             try:
-                btn.pressed.connect(lambda it=it: self.list.setCurrentItem(it))
+                btn.pressed.connect(lambda _=False, chat_id=cid: self._select_chat_by_id(chat_id))
             except Exception:
                 pass
             lh.addWidget(title_edit, 1)
@@ -890,6 +892,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._chat_started = False
+    def _select_chat_by_id(self, cid: str) -> None:
+        """Select the list row corresponding to the given chat id."""
+        try:
+            for i in range(self.list.count()):
+                it = self.list.item(i)
+                if it and it.data(Qt.UserRole) == cid:
+                    self.list.setCurrentRow(i)
+                    return
+        except Exception:
+            pass
     def _start_download_model(self, model: str) -> None:
         title = 'Download Required'
         size_hint = None
@@ -1296,6 +1308,19 @@ class MainWindow(QMainWindow):
         txt = self.entry.toPlainText().strip()
         if not txt or not self._current_chat:
             return
+        # Derive model from combo box in case _on_model_changed didn't fire
+        try:
+            current_model = self.model_combo.currentText()
+        except Exception:
+            current_model = self._model
+        if current_model and '─' not in (current_model or ''):
+            self._model = current_model
+        if not self._model:
+            try:
+                QMessageBox.warning(self, 'Select Model', 'Please select a model in the top toolbar before sending a message.')
+            except Exception:
+                pass
+            return
         origin_cid = self._current_chat
         self.entry.clear()
         now_iso = datetime.now().isoformat()
@@ -1329,9 +1354,14 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         try:
-            self._typing_debounce.timeout.disconnect()
+            if getattr(self, '_typing_fire_slot', None) is not None:
+                try:
+                    self._typing_debounce.timeout.disconnect(self._typing_fire_slot)
+                except Exception:
+                    pass
         except Exception:
             pass
+        self._typing_fire_slot = _fire_typing
         self._typing_debounce.timeout.connect(_fire_typing)
         try:
             self._typing_debounce.start(300)
@@ -1416,7 +1446,8 @@ class MainWindow(QMainWindow):
             def _tick() -> None:
                 idx = state['index']
                 s = state['text']
-                step = 2
+                # Speed up typing for longer messages while keeping it readable
+                step = max(3, int(len(s) // 120) or 3)
                 if idx >= len(s):
                     try:
                         state['timer'].stop()

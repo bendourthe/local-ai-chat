@@ -167,7 +167,7 @@ class FoundryCLI:
             prompt_res = re.compile(r"Interactive mode|enter your prompt|^\s*>\s*$", re.IGNORECASE)
             start_res = re.compile(r"Interactive Chat|Interactive mode|Enter /\?|^\s*>\s*$", re.IGNORECASE)
             last_flush = time.time()
-            use_fallback = False  # Only emit formatted assistant blocks
+            use_fallback = True  # Fallback to plain text accumulation when structured blocks are absent
             def flush_acc() -> None:
                 if acc and on_assistant:
                     on_assistant("\n".join(acc).strip())

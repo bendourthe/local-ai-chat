@@ -135,15 +135,15 @@ class SettingsDialog(QDialog):
         v.setSpacing(12)
         self._rows: List[ColorPickerRow] = []
         labels = self._labels()
-        # Compute a uniform label width so color boxes align vertically across sections
+        # Compute a uniform label width so color boxes align vertically across sections (wide enough to avoid wrapping)
         fm = QFontMetrics(self.font())
         try:
             all_keys: List[str] = []
             for _title, group in self._sections():
                 all_keys.extend(group)
-            max_label_w = max((fm.horizontalAdvance(labels.get(k, k)) for k in all_keys), default=0) + 48
+            max_label_w = max((fm.horizontalAdvance(labels.get(k, k)) for k in all_keys), default=0) + 80
         except Exception:
-            max_label_w = 160
+            max_label_w = 220
         # Build each section inside a framed container
         for title, group in self._sections():
             section = QFrame()
@@ -166,7 +166,7 @@ class SettingsDialog(QDialog):
             except Exception:
                 pass
             try:
-                form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+                form.setRowWrapPolicy(QFormLayout.DontWrapRows)
             except Exception:
                 pass
             form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -181,9 +181,9 @@ class SettingsDialog(QDialog):
                     pass
                 try:
                     lbl.setMinimumWidth(max_label_w)
-                    lbl.setWordWrap(True)
+                    lbl.setWordWrap(False)
                     lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                    lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
                 except Exception:
                     pass
                 form.addRow(lbl, row)

@@ -11,12 +11,12 @@
     "chat_history": {
       "SIDEBAR_BG": "#212938",
       "CHAT_LIST_BG": "#2d3748",
-      "CHAT_LIST_ITEM_SELECTED_BG": "#183161"
+      "CHAT_LIST_ITEM_SELECTED_BG": "#41526b"
     },
     "chat_area": {
       "CHAT_OUTER_BG": "#212938",
       "CHAT_INNER_BG": "#2d3748",
-      "BUBBLE_USER": "#183161",
+      "BUBBLE_USER": "#41526b",
       "BUBBLE_AI": "#0F2347"
     },
     "typing_area": {
@@ -46,12 +46,12 @@
     "chat_history": {
       "SIDEBAR_BG": "#212938",
       "CHAT_LIST_BG": "#2d3748",
-      "CHAT_LIST_ITEM_SELECTED_BG": "#183161"
+      "CHAT_LIST_ITEM_SELECTED_BG": "#41526b"
     },
     "chat_area": {
       "CHAT_OUTER_BG": "#212938",
       "CHAT_INNER_BG": "#2d3748",
-      "BUBBLE_USER": "#183161",
+      "BUBBLE_USER": "#41526b",
       "BUBBLE_AI": "#0F2347"
     },
     "typing_area": {
