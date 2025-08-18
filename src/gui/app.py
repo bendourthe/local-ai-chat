@@ -1306,7 +1306,7 @@ class MainWindow(QMainWindow):
     # --- Send ---
     def _send(self) -> None:
         txt = self.entry.toPlainText().strip()
-        if not txt or not self._current_chat:
+        if not txt:
             return
         # Derive model from combo box in case _on_model_changed didn't fire
         try:
@@ -1321,12 +1321,32 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return
+        # Ensure there is a current chat; if none, create and select one now
         origin_cid = self._current_chat
+        if origin_cid is None:
+            try:
+                origin_cid = storage.create_chat('New Chat')
+            except Exception:
+                origin_cid = None
+            try:
+                self._load_chats()
+                if origin_cid is not None:
+                    self._select_chat_by_id(origin_cid)
+            except Exception:
+                pass
+            self._current_chat = origin_cid
+            self._messages = []
+            try:
+                self.chat.reset_day_groups()
+            except Exception:
+                pass
+        if origin_cid is None:
+            return
         self.entry.clear()
         now_iso = datetime.now().isoformat()
         self.chat.add_message('user', txt, now_iso)
         self._messages.append({'role':'user','content':txt,'ts':now_iso})
-        storage.save_messages(self._current_chat, self._messages)
+        storage.save_messages(origin_cid, self._messages)
         self._ensure_chat_started()
         # Debounce typing indicator (show if assistant not yet responded after 300ms)
         self._assistant_waiting = True
