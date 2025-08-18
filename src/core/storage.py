@@ -33,11 +33,13 @@ def _chat_base_dir() -> str:
 
 _CHATS_DIR = os.path.join(_chat_base_dir(), 'chat_history')
 _MODELS_FILE = os.path.join(_base_dir(), 'data', 'models.json')
+_SETTINGS_FILE = os.path.join(_chat_base_dir(), 'settings.json')
 
 def _ensure_dirs() -> None:
     """Create chat and models directories if absent."""
     os.makedirs(_CHATS_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(_MODELS_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(_SETTINGS_FILE), exist_ok=True)
 
 def _slug(title: str) -> str:
     """Sanitize a title for safe filesystem use on all platforms."""
@@ -299,3 +301,62 @@ def migrate_downloaded_aliases(pairs: List[Tuple[str, str]]) -> None:
             changed = True
     if changed:
         _write_models({'downloaded': sorted(d)})
+
+# ---- App settings (generic key/value persisted in settings.json) ----
+
+def _default_settings() -> Dict:
+    """Return default application settings."""
+    return {
+        'chat_show_timestamp': True,
+        'chat_show_role': True,
+    }
+
+def _read_settings() -> Dict:
+    """Read settings.json and merge over defaults."""
+    _ensure_dirs()
+    base = dict(_default_settings())
+    try:
+        if os.path.exists(_SETTINGS_FILE):
+            with open(_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f) or {}
+                if isinstance(data, dict):
+                    base.update(data)
+    except Exception:
+        pass
+    return base
+
+def _write_settings(data: Dict) -> None:
+    """Write settings.json safely with defaults filled for missing keys."""
+    _ensure_dirs()
+    merged = dict(_default_settings())
+    try:
+        if isinstance(data, dict):
+            merged.update(data)
+    except Exception:
+        pass
+    with open(_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+def get_app_settings() -> Dict:
+    """Return a copy of the current application settings dict."""
+    return dict(_read_settings())
+
+def set_app_settings(settings: Dict) -> None:
+    """Replace application settings with provided dict (merged over defaults)."""
+    _write_settings(dict(settings or {}))
+
+def get_bool(key: str, default: Optional[bool] = None) -> bool:
+    """Return a boolean setting with fallback to default or defaults map."""
+    if default is None:
+        default = bool(_default_settings().get(key, False))
+    try:
+        v = _read_settings().get(key)
+        return bool(v) if v is not None else bool(default)
+    except Exception:
+        return bool(default)
+
+def set_bool(key: str, value: bool) -> None:
+    """Persist a boolean setting."""
+    cur = _read_settings()
+    cur[key] = bool(value)
+    _write_settings(cur)

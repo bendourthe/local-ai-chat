@@ -1,8 +1,9 @@
 from typing import Dict, List
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics
-from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QTabWidget, QWidget, QScrollArea, QFormLayout, QHBoxLayout, QPushButton, QLineEdit, QColorDialog, QLabel, QMessageBox, QFrame, QSizePolicy
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QTabWidget, QWidget, QScrollArea, QFormLayout, QHBoxLayout, QPushButton, QLineEdit, QColorDialog, QLabel, QMessageBox, QFrame, QSizePolicy, QCheckBox
 from . import styles
+from core import storage
 
 class ColorPickerRow(QWidget):
     """Row with a label, color preview button, and hex input for a single theme key."""
@@ -49,6 +50,8 @@ class ColorPickerRow(QWidget):
 class SettingsDialog(QDialog):
     """Settings dialog with a Theme tab supporting live preview and save/restore."""
     themeChanged = Signal(dict)
+    chatShowRoleChanged = Signal(bool)
+    chatShowTimestampChanged = Signal(bool)
     def __init__(self, parent: QWidget = None, initial_theme: Dict[str, str] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle('Settings')
@@ -58,6 +61,19 @@ class SettingsDialog(QDialog):
         self._default_theme = dict(styles.get_default_theme())
         _saved = styles.read_saved_current()
         self._saved_theme = dict(_saved if _saved is not None else styles.get_theme())
+        # Chat toggles current and saved baselines
+        try:
+            self._chat_show_role = bool(storage.get_bool('chat_show_role', True))
+        except Exception:
+            self._chat_show_role = True
+        try:
+            self._chat_show_ts = bool(storage.get_bool('chat_show_timestamp', True))
+        except Exception:
+            self._chat_show_ts = True
+        self._saved_chat_settings = {
+            'chat_show_role': bool(self._chat_show_role),
+            'chat_show_timestamp': bool(self._chat_show_ts),
+        }
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12,12,12,12)
         outer.setSpacing(8)
@@ -68,6 +84,7 @@ class SettingsDialog(QDialog):
             pass
         outer.addWidget(self._tabs, 1)
         self._build_theme_tab()
+        self._build_chat_tab()
         btns = QHBoxLayout()
         btns.setContentsMargins(0,0,0,0)
         btns.setSpacing(6)
@@ -196,9 +213,54 @@ class SettingsDialog(QDialog):
         lay.setSpacing(0)
         lay.addWidget(scroll, 1)
         self._tabs.addTab(page, 'Theme')
+    def _build_chat_tab(self) -> None:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(12,12,12,12)
+        v.setSpacing(8)
+        form = QFormLayout()
+        form.setContentsMargins(0,0,0,0)
+        form.setSpacing(8)
+        try:
+            form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        except Exception:
+            pass
+        # Show Role checkbox
+        self._cb_role = QCheckBox('Show Chat Role')
+        try:
+            self._cb_role.setChecked(bool(self._chat_show_role))
+        except Exception:
+            pass
+        self._cb_role.toggled.connect(self._on_chat_role_toggled)
+        form.addRow(self._cb_role)
+        # Show Timestamp checkbox
+        self._cb_ts = QCheckBox('Show Chat Timestamp')
+        try:
+            self._cb_ts.setChecked(bool(self._chat_show_ts))
+        except Exception:
+            pass
+        self._cb_ts.toggled.connect(self._on_chat_ts_toggled)
+        form.addRow(self._cb_ts)
+        v.addLayout(form)
+        v.addStretch(1)
+        self._tabs.addTab(page, 'Chat')
     def _on_row_changed(self, key: str, value: str) -> None:
         self._theme[key] = value
         self._apply_preview()
+        self._refresh_button_states()
+    def _on_chat_role_toggled(self, v: bool) -> None:
+        self._chat_show_role = bool(v)
+        try:
+            self.chatShowRoleChanged.emit(bool(v))
+        except Exception:
+            pass
+        self._refresh_button_states()
+    def _on_chat_ts_toggled(self, v: bool) -> None:
+        self._chat_show_ts = bool(v)
+        try:
+            self.chatShowTimestampChanged.emit(bool(v))
+        except Exception:
+            pass
         self._refresh_button_states()
     def _apply_preview(self) -> None:
         """Apply a live preview stylesheet without mutating the global theme."""
@@ -235,6 +297,16 @@ class SettingsDialog(QDialog):
             minimal = dict(self._theme)
         styles.save_theme(minimal)
         self._saved_theme = dict(minimal)
+        # Persist chat settings
+        try:
+            storage.set_bool('chat_show_role', bool(self._chat_show_role))
+            storage.set_bool('chat_show_timestamp', bool(self._chat_show_ts))
+        except Exception:
+            pass
+        self._saved_chat_settings = {
+            'chat_show_role': bool(self._chat_show_role),
+            'chat_show_timestamp': bool(self._chat_show_ts),
+        }
         # Ensure applied baseline matches saved (spec: Save applies changes too)
         self._apply_live()
     def _restore_defaults(self) -> None:
@@ -244,17 +316,27 @@ class SettingsDialog(QDialog):
             if row._key in self._theme:
                 row._edit.setText(self._theme[row._key])
         self._apply_preview()
+        # Reset chat toggles to defaults (True)
+        try:
+            self._cb_role.setChecked(True)
+            self._cb_ts.setChecked(True)
+        except Exception:
+            pass
         self._refresh_button_states()
 
     def _refresh_button_states(self) -> None:
         """Update Save/Restore button properties based on edit state."""
         try:
             keys = self._editable_keys()
-            changed_vs_saved = any(self._theme.get(k) != self._saved_theme.get(k) for k in keys)
-            differs_default_saved = any(self._saved_theme.get(k) != self._default_theme.get(k) for k in keys)
+            theme_changed_vs_saved = any(self._theme.get(k) != self._saved_theme.get(k) for k in keys)
+            theme_differs_default_saved = any(self._saved_theme.get(k) != self._default_theme.get(k) for k in keys)
         except Exception:
-            changed_vs_saved = self._theme != self._saved_theme
-            differs_default_saved = self._saved_theme != self._default_theme
+            theme_changed_vs_saved = self._theme != self._saved_theme
+            theme_differs_default_saved = self._saved_theme != self._default_theme
+        chat_changed_vs_saved = bool(self._chat_show_role != self._saved_chat_settings.get('chat_show_role') or self._chat_show_ts != self._saved_chat_settings.get('chat_show_timestamp'))
+        chat_differs_default = bool(self._saved_chat_settings.get('chat_show_role') != True or self._saved_chat_settings.get('chat_show_timestamp') != True)
+        changed_vs_saved = bool(theme_changed_vs_saved or chat_changed_vs_saved)
+        differs_default_saved = bool(theme_differs_default_saved or chat_differs_default)
         self._save_btn.setProperty('changed', bool(changed_vs_saved))
         self._restore_btn.setProperty('needsReset', bool(differs_default_saved))
         for b in (self._save_btn, self._restore_btn):
@@ -272,9 +354,11 @@ class SettingsDialog(QDialog):
         # Determine if there are unsaved changes
         try:
             keys = self._editable_keys()
-            changed_vs_saved = any(self._theme.get(k) != self._saved_theme.get(k) for k in keys)
+            theme_changed_vs_saved = any(self._theme.get(k) != self._saved_theme.get(k) for k in keys)
         except Exception:
-            changed_vs_saved = self._theme != self._saved_theme
+            theme_changed_vs_saved = self._theme != self._saved_theme
+        chat_changed_vs_saved = bool(self._chat_show_role != self._saved_chat_settings.get('chat_show_role') or self._chat_show_ts != self._saved_chat_settings.get('chat_show_timestamp'))
+        changed_vs_saved = bool(theme_changed_vs_saved or chat_changed_vs_saved)
         if not changed_vs_saved:
             event.accept()
             try:
@@ -285,7 +369,7 @@ class SettingsDialog(QDialog):
         mb = QMessageBox(self)
         mb.setIcon(QMessageBox.Question)
         mb.setWindowTitle('Unsaved Changes')
-        mb.setText('You have unsaved theme changes. Do you want to save them?')
+        mb.setText('You have unsaved changes. Do you want to save them?')
         save_btn = mb.addButton('Save', QMessageBox.AcceptRole)
         discard_btn = mb.addButton("Don't Save", QMessageBox.DestructiveRole)
         mb.setDefaultButton(save_btn)
@@ -306,6 +390,12 @@ class SettingsDialog(QDialog):
                 if app:
                     qss = styles.regenerate_qss(self._saved_theme)
                     app.setStyleSheet(qss)
+            except Exception:
+                pass
+            # Revert chat toggles to last saved and emit changes
+            try:
+                self._cb_role.setChecked(bool(self._saved_chat_settings.get('chat_show_role', True)))
+                self._cb_ts.setChecked(bool(self._saved_chat_settings.get('chat_show_timestamp', True)))
             except Exception:
                 pass
             event.accept()

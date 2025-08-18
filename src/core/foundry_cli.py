@@ -25,6 +25,8 @@ class FoundryCLI:
         self._stdout_q: "queue.Queue[str]" = queue.Queue()
         self._stop_event = threading.Event()
         self._buffer = ""
+        self._device_backend: Optional[str] = None
+
     def is_installed(self) -> bool:
         """Return True if the `foundry` command is available."""
         try:
@@ -129,7 +131,7 @@ class FoundryCLI:
             if m:
                 return f"{m.group(1)} {m.group(2).upper()}"
         return None
-    def start_chat(self, model: str, on_raw_output: Optional[Callable[[str], None]] = None, on_assistant: Optional[Callable[[str], None]] = None) -> None:
+    def start_chat(self, model: str, on_raw_output: Optional[Callable[[str], None]] = None, on_assistant: Optional[Callable[[str], None]] = None, flush_secs: float = 0.4) -> None:
         """
         Start an interactive chat session `foundry model run <model>` and begin reading stdout on a background thread.
 
@@ -137,10 +139,12 @@ class FoundryCLI:
             - model (str): Model name to run
             - on_raw_output (Callable[[str], None]): Callback for each raw line
             - on_assistant (Callable[[str], None]): Callback when an assistant final block is parsed
+            - flush_secs (float): Debounce interval for streaming assistant text flushes (default 0.4s)
         """
         self.stop_chat()
         self._stop_event.clear()
         self._buffer = ""
+        self._device_backend = None
         args = ["foundry", "model", "run", model]
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, creationflags=flags)
@@ -163,19 +167,32 @@ class FoundryCLI:
                 re.compile(r"^(device|task|alias|model id)\b", re.IGNORECASE),
                 # Skip any raw markup tokens so we don't render unformatted content
                 re.compile(r"<\|(start|channel|message|return)\|>", re.IGNORECASE),
+                # Heuristics: drop obvious chain-of-thought style lines in fallback mode
+                re.compile(r"^\s*\".*?\"\s*$"),  # pure quoted line
+                re.compile(r"\b(thinking|analysis|reasoning|plan|scratchpad)\b", re.IGNORECASE),
             ]
             prompt_res = re.compile(r"Interactive mode|enter your prompt|^\s*>\s*$", re.IGNORECASE)
             start_res = re.compile(r"Interactive Chat|Interactive mode|Enter /\?|^\s*>\s*$", re.IGNORECASE)
             last_flush = time.time()
-            use_fallback = True  # Fallback to plain text accumulation when structured blocks are absent
+            use_fallback = True  # Fallback only until we detect structured assistant blocks
             def flush_acc() -> None:
+                # Only flush fallback content if we're still in fallback mode
+                if not use_fallback:
+                    acc.clear()
+                    return
                 if acc and on_assistant:
                     on_assistant("\n".join(acc).strip())
                 acc.clear()
             def maybe_flush_by_time() -> None:
                 nonlocal last_flush
                 now = time.time()
-                if acc and (now - last_flush) >= 0.4:
+                try:
+                    interval = float(flush_secs)
+                except Exception:
+                    interval = 0.4
+                if interval <= 0:
+                    interval = 0.4
+                if acc and (now - last_flush) >= interval:
                     flush_acc()
                     last_flush = now
             ready = False
@@ -187,6 +204,10 @@ class FoundryCLI:
                     on_raw_output(line.rstrip("\n"))
                 self._buffer += line
                 for m in _ASSISTANT_BLOCK_RE.finditer(self._buffer):
+                    # Switch off fallback: trust structured assistant blocks exclusively
+                    if use_fallback:
+                        acc.clear()
+                        use_fallback = False
                     content = m.group(1)
                     if on_assistant:
                         on_assistant(content)
@@ -194,6 +215,14 @@ class FoundryCLI:
                     parts = self._buffer.split("<|return|>")
                     self._buffer = parts[-1]
                 s = line.strip("\n")
+                # Best-effort device backend detection from startup lines
+                try:
+                    if self._device_backend is None:
+                        name = self._detect_device_backend(s)
+                        if name:
+                            self._device_backend = name
+                except Exception:
+                    pass
                 if s.strip() == "":
                     flush_acc()
                     continue
@@ -222,6 +251,42 @@ class FoundryCLI:
                 self._proc.wait()
         self._reader_thread = threading.Thread(target=_reader, daemon=True)
         self._reader_thread.start()
+    def get_device_backend(self) -> Optional[str]:
+        """Return the last detected device backend name (e.g., 'CUDA GPU', 'DirectML GPU', 'CPU')."""
+        return self._device_backend
+    def _detect_device_backend(self, s: str) -> Optional[str]:
+        """Return a normalized accelerator name if a line indicates device backend."""
+        txt = (s or '').strip()
+        low = txt.lower()
+        m = re.match(r"\s*device\s*[:=]\s*(.+)$", txt, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            return self._normalize_backend_name(val)
+        if any(k in low for k in ('accelerator', 'backend', 'runtime')) and any(k in low for k in ('cuda','directml','dml','rocm','mps','metal','openvino','cpu','gpu')):
+            return self._normalize_backend_name(txt)
+        if 'model id' in low and any(x in low for x in ('-cuda-gpu','-dml-gpu','-rocm-gpu','-cpu','-metal-gpu','-mps')):
+            return self._normalize_backend_name(txt)
+        if any(k in low for k in ('cuda','directml',' dml ','rocm','mps','metal','openvino')):
+            return self._normalize_backend_name(txt)
+        return None
+    def _normalize_backend_name(self, raw: str) -> Optional[str]:
+        """Map arbitrary device strings into a concise label."""
+        low = (raw or '').lower()
+        if 'cuda' in low or 'nvidia' in low:
+            return 'CUDA GPU'
+        if 'directml' in low or re.search(r"\bdml\b", low):
+            return 'DirectML GPU'
+        if 'rocm' in low or 'amd' in low:
+            return 'ROCm GPU'
+        if 'mps' in low or 'metal' in low:
+            return 'Metal GPU'
+        if 'openvino' in low:
+            return 'OpenVINO'
+        if re.search(r"\bcpu\b", low):
+            return 'CPU'
+        if 'gpu' in low:
+            return 'GPU'
+        return None
     def list_cached_pairs(self) -> List[Tuple[str, str]]:
         """Return a list of (alias, model_id) for models present in the local cache."""
         try:

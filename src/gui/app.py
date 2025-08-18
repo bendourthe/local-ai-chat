@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._models_populating: bool = False
         self._bridge = _Bridge()
         self._bridge.assistant.connect(self._on_assistant)
+        self._bridge.raw.connect(self._on_raw)
         self._bridge.dl_line.connect(self._on_download_output)
         self._bridge.dl_done.connect(self._on_download_done)
         self._bridge.rm_line.connect(self._on_delete_output)
@@ -85,6 +86,8 @@ class MainWindow(QMainWindow):
         # Track per-chat pending requests (refcount) and route responses
         self._waiting_by_chat: Dict[str, int] = {}
         self._inflight_queue = deque()  # type: deque[str]
+        # Device backend detection state
+        self._device_backend: Optional[str] = None
         def _apply_small_shadow(w):
             """Apply a small drop shadow to a widget."""
             eff = QGraphicsDropShadowEffect(self)
@@ -197,6 +200,19 @@ class MainWindow(QMainWindow):
         _apply_small_shadow(delm_btn)
         tb.addWidget(ref_tb)
         tb.addWidget(delm_btn)
+        # Device backend label (updated from CLI output)
+        try:
+            _sp_dev_l = QWidget(); _sp_dev_l.setFixedWidth(10)
+            tb.addWidget(_sp_dev_l)
+        except Exception:
+            pass
+        self.device_label = QLabel('Acceleration: ---')
+        try:
+            self.device_label.setObjectName('DeviceLabel')
+            self.device_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        except Exception:
+            pass
+        tb.addWidget(self.device_label)
         # Push following items to the far right
         try:
             _spacer = QWidget(); _spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -219,6 +235,20 @@ class MainWindow(QMainWindow):
         cbv = QVBoxLayout(chat_board)
         cbv.setContentsMargins(0, 0, 0, 0)
         self.chat = ChatView(); cbv.addWidget(self.chat, 1)
+        # Initialize chat visibility toggles from persistent settings
+        try:
+            show_role = bool(storage.get_bool('chat_show_role', True))
+        except Exception:
+            show_role = True
+        try:
+            show_ts = bool(storage.get_bool('chat_show_timestamp', True))
+        except Exception:
+            show_ts = True
+        try:
+            self.chat.set_show_role(show_role)
+            self.chat.set_show_timestamp(show_ts)
+        except Exception:
+            pass
         try:
             self.chat.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         except Exception:
@@ -876,6 +906,13 @@ class MainWindow(QMainWindow):
             self._model = None
             return
         self._model = s
+        # Reset device label on model change
+        try:
+            self._device_backend = None
+            if hasattr(self, 'device_label') and self.device_label is not None:
+                self.device_label.setText('Acceleration: ---')
+        except Exception:
+            pass
         # If model isn't downloaded, prompt to download with progress
         try:
             downloaded = set(storage.get_downloaded_models())
@@ -892,6 +929,65 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._chat_started = False
+
+    def _on_raw(self, line: str) -> None:
+        """Parse raw CLI output lines to detect and display the active device backend."""
+        try:
+            name = self._detect_device_backend(line)
+        except Exception:
+            name = None
+        if not name:
+            return
+        if name == self._device_backend:
+            return
+        self._device_backend = name
+        try:
+            if hasattr(self, 'device_label') and self.device_label is not None:
+                self.device_label.setText(f'Acceleration: {name}')
+        except Exception:
+            pass
+
+    def _detect_device_backend(self, s: str) -> Optional[str]:
+        """Return a normalized accelerator name if the line indicates device backend."""
+        try:
+            txt = s.strip()
+        except Exception:
+            txt = s or ''
+        low = txt.lower()
+        # Strong signal: explicit Device: header
+        m = re.match(r"\s*acceleration\s*[:=]\s*(.+)$", txt, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            return self._normalize_backend_name(val)
+        # Strong signal: line mentions accelerator and looks like a header
+        if any(k in low for k in ('accelerator', 'backend', 'runtime')) and any(k in low for k in ('cuda','directml','dml','rocm','mps','metal','openvino','cpu','gpu')):
+            return self._normalize_backend_name(txt)
+        # Model ID hint line
+        if 'model id' in low and any(x in low for x in ('-cuda-gpu','-dml-gpu','-rocm-gpu','-cpu','-metal-gpu','-mps')):
+            return self._normalize_backend_name(txt)
+        # Generic mention but with GPU-specific keywords
+        if any(k in low for k in ('cuda','directml',' dml ','rocm','mps','metal','openvino')):
+            return self._normalize_backend_name(txt)
+        return None
+
+    def _normalize_backend_name(self, raw: str) -> Optional[str]:
+        """Map arbitrary device strings into a concise label."""
+        low = (raw or '').lower()
+        if 'cuda' in low or 'nvidia' in low:
+            return 'CUDA GPU'
+        if 'directml' in low or re.search(r"\bdml\b", low):
+            return 'DirectML GPU'
+        if 'rocm' in low or 'amd' in low:
+            return 'ROCm GPU'
+        if 'mps' in low or 'metal' in low:
+            return 'Metal GPU'
+        if 'openvino' in low:
+            return 'OpenVINO'
+        if re.search(r"\bcpu\b", low):
+            return 'CPU'
+        if 'gpu' in low:
+            return 'GPU'
+        return None
     def _select_chat_by_id(self, cid: str) -> None:
         """Select the list row corresponding to the given chat id."""
         try:
@@ -1400,7 +1496,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self._cli.start_chat(self._model, on_assistant=lambda s: self._bridge.assistant.emit(s))
+            self._cli.start_chat(self._model, on_raw_output=lambda s: self._bridge.raw.emit(s), on_assistant=lambda s: self._bridge.assistant.emit(s))
             self._chat_started = True
         except Exception:
             self._chat_started = False
@@ -1409,10 +1505,37 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.setStyleSheet(qss)
+    
+    def _on_chat_show_role_changed(self, v: bool) -> None:
+        try:
+            self.chat.set_show_role(bool(v))
+        except Exception:
+            pass
+        try:
+            storage.set_bool('chat_show_role', bool(v))
+        except Exception:
+            pass
+    
+    def _on_chat_show_timestamp_changed(self, v: bool) -> None:
+        try:
+            self.chat.set_show_timestamp(bool(v))
+        except Exception:
+            pass
+        try:
+            storage.set_bool('chat_show_timestamp', bool(v))
+        except Exception:
+            pass
+    
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self, initial_theme=styles.get_theme())
         dlg.themeChanged.connect(self._apply_theme)
+        try:
+            dlg.chatShowRoleChanged.connect(self._on_chat_show_role_changed)
+            dlg.chatShowTimestampChanged.connect(self._on_chat_show_timestamp_changed)
+        except Exception:
+            pass
         dlg.exec()
+    
     def _on_assistant(self, text: str) -> None:
         """Animate assistant reply with typing effect and save on completion."""
         # Determine originating chat for this reply
@@ -1436,13 +1559,12 @@ class MainWindow(QMainWindow):
         now_iso = datetime.now().isoformat()
         # If the reply is for the currently open chat, animate it in UI
         if self._current_chat == cid:
-            # Stop typing indicator only if no other pending prompts for this chat
+            # Always remove typing indicator before rendering assistant reply
             self._assistant_waiting = False
-            if remaining <= 0:
-                try:
-                    self.chat.hide_typing()
-                except Exception:
-                    pass
+            try:
+                self.chat.hide_typing()
+            except Exception:
+                pass
             sticky = False
             try:
                 sticky = bool(self.chat.is_at_bottom())

@@ -58,6 +58,9 @@ class Bubble(QFrame):
         # Track preferred width and last bounds
         self._desired_width: int | None = None
         self._last_bounds: tuple[int, int] = (0, 0)
+        # Visibility flags (default True)
+        self._show_role = True
+        self._show_ts = True
     def _natural_content_width(self) -> int:
         """Return width in pixels of the longer of header or single-line message, including bubble padding."""
         try:
@@ -65,7 +68,9 @@ class Bubble(QFrame):
             spc = 8
             fm_sender = QFontMetrics(self._sender_label.font())
             fm_ts = QFontMetrics(self._ts_label.font())
-            w_header = fm_sender.horizontalAdvance(self._sender_label.text()) + spc + fm_ts.horizontalAdvance(self._ts_label.text()) + pad
+            w_sender = fm_sender.horizontalAdvance(self._sender_label.text()) if self._sender_label.isVisible() else 0
+            w_ts = fm_ts.horizontalAdvance(self._ts_label.text()) if self._ts_label.isVisible() else 0
+            w_header = w_sender + (spc if (w_sender and w_ts) else 0) + w_ts + pad
             fm_msg = QFontMetrics(self._msg_label.font())
             txt = (self._msg_label.text() or '').replace('\n', ' ')
             w_msg = fm_msg.horizontalAdvance(txt) + pad
@@ -134,6 +139,30 @@ class Bubble(QFrame):
     def text(self) -> str:
         """Return current message text."""
         return self._msg_label.text()
+    def set_show_role(self, v: bool) -> None:
+        """Show or hide the sender label."""
+        self._show_role = bool(v)
+        try:
+            self._sender_label.setVisible(self._show_role)
+        except Exception:
+            pass
+        try:
+            mn, mx = self._last_bounds
+            self.apply_width(mn, mx)
+        except Exception:
+            pass
+    def set_show_timestamp(self, v: bool) -> None:
+        """Show or hide the timestamp label."""
+        self._show_ts = bool(v)
+        try:
+            self._ts_label.setVisible(self._show_ts)
+        except Exception:
+            pass
+        try:
+            mn, mx = self._last_bounds
+            self.apply_width(mn, mx)
+        except Exception:
+            pass
 
 class ChatView(QScrollArea):
     """Scrollable chat view that stacks Bubble widgets left/right."""
@@ -162,6 +191,9 @@ class ChatView(QScrollArea):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._v.addWidget(spacer)
+        # Chat-level visibility flags (default True)
+        self._show_role = True
+        self._show_ts = True
     def reset_day_groups(self) -> None:
         """Reset internal grouping so next message will insert a new date separator."""
         self._last_date_key = None
@@ -170,7 +202,7 @@ class ChatView(QScrollArea):
         month = dt.strftime('%b') + '.'
         return f"{month} {dt.day}, {dt.year}"
     def _fmt_time(self, dt: datetime) -> str:
-        """Format timestamp like '01:50:45 AM'."""
+        """Format time like '01:50:45 AM'."""
         return dt.strftime('%I:%M:%S %p')
     def add_message(self, role: str, text: str, iso_ts: str):
         # Determine sender side
@@ -189,6 +221,11 @@ class ChatView(QScrollArea):
             self._v.insertWidget(self._v.count()-1, sep)
         # Build bubble with time-only in header
         bubble = Bubble(text, is_user, self._fmt_time(dt))
+        try:
+            bubble.set_show_role(bool(self._show_role))
+            bubble.set_show_timestamp(bool(self._show_ts))
+        except Exception:
+            pass
         # Apply initial min/max width based on viewport
         try:
             mn, mx = self._bubble_widths()
@@ -261,6 +298,46 @@ class ChatView(QScrollArea):
         """Scroll the view to the bottom."""
         sb = self.verticalScrollBar()
         sb.setValue(sb.maximum())
+    def set_show_role(self, v: bool) -> None:
+        """Set whether bubbles show the sender label; updates existing bubbles."""
+        self._show_role = bool(v)
+        try:
+            for i in range(self._v.count()):
+                it = self._v.itemAt(i)
+                w = it.widget() if it is not None else None
+                if not isinstance(w, QFrame):
+                    continue
+                lay = w.layout()
+                if not isinstance(lay, QHBoxLayout):
+                    continue
+                for j in range(lay.count()):
+                    cw = lay.itemAt(j).widget()
+                    if isinstance(cw, Bubble):
+                        cw.set_show_role(self._show_role)
+                        break
+        except Exception:
+            pass
+        self._apply_bubble_widths()
+    def set_show_timestamp(self, v: bool) -> None:
+        """Set whether bubbles show the timestamp label; updates existing bubbles."""
+        self._show_ts = bool(v)
+        try:
+            for i in range(self._v.count()):
+                it = self._v.itemAt(i)
+                w = it.widget() if it is not None else None
+                if not isinstance(w, QFrame):
+                    continue
+                lay = w.layout()
+                if not isinstance(lay, QHBoxLayout):
+                    continue
+                for j in range(lay.count()):
+                    cw = lay.itemAt(j).widget()
+                    if isinstance(cw, Bubble):
+                        cw.set_show_timestamp(self._show_ts)
+                        break
+        except Exception:
+            pass
+        self._apply_bubble_widths()
     def show_typing(self, sticky: bool = True) -> None:
         """Show a three-dot typing indicator aligned as an AI bubble."""
         # If already visible, just restart animation
@@ -275,6 +352,11 @@ class ChatView(QScrollArea):
             # Build a minimal AI bubble and insert it
             dt = datetime.now()
             bubble = Bubble('', False, self._fmt_time(dt))
+            try:
+                bubble.set_show_role(bool(self._show_role))
+                bubble.set_show_timestamp(bool(self._show_ts))
+            except Exception:
+                pass
             try:
                 mn, mx = self._bubble_widths()
                 bubble.apply_width(mn, mx)
@@ -363,3 +445,4 @@ class ChatView(QScrollArea):
                 pass
         self._typing_cont = None
         self._typing_bubble = None
+
