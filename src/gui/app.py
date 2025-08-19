@@ -430,6 +430,25 @@ class MainWindow(QMainWindow):
             pass
         self._refresh_models()
     def closeEvent(self, e) -> None:
+        # Stop typing animation/timers and hide indicator
+        try:
+            if self._typing and isinstance(self._typing, dict):
+                tmr = self._typing.get('timer')
+                if tmr:
+                    tmr.stop()
+        except Exception:
+            pass
+        self._typing = None
+        try:
+            self._typing_debounce.stop()
+        except Exception:
+            pass
+        self._assistant_waiting = False
+        try:
+            self.chat.hide_typing()
+        except Exception:
+            pass
+        # Ensure backend request is cancelled
         try:
             self._cli.stop_chat()
         except Exception:
@@ -559,21 +578,27 @@ class MainWindow(QMainWindow):
             role = m.get('role','assistant')
             txt = m.get('content','')
             iso = m.get('ts')
-            self.chat.add_message(role, txt, iso)
+            self.chat.add_message(role, txt, iso, animate=False)
         # Show or hide typing indicator based on per-chat waiting state
         try:
             if int(self._waiting_by_chat.get(cid, 0)) > 0:
-                sticky = False
-                try:
-                    sticky = bool(self.chat.is_at_bottom())
-                except Exception:
-                    sticky = False
-                self.chat.show_typing(sticky=sticky)
+                self.chat.show_typing(sticky=True)
             else:
                 self.chat.hide_typing()
         except Exception:
             pass
         self.chat._v.setEnabled(True)
+        def _scroll_on_open() -> None:
+            try:
+                self.chat.scroll_to_bottom()
+            except Exception:
+                pass
+        try:
+            QTimer.singleShot(0, _scroll_on_open)
+            QTimer.singleShot(16, _scroll_on_open)
+            QTimer.singleShot(100, _scroll_on_open)
+        except Exception:
+            pass
     def _new_chat(self) -> None:
         cid = storage.create_chat('New Chat')
         self._load_chats()
@@ -739,14 +764,32 @@ class MainWindow(QMainWindow):
     def _delete_chat_by_id(self, cid: str) -> None:
         storage.delete_chat(cid)
         if self._current_chat == cid:
-            self._current_chat = None
-            self._messages = []
-            # Hide typing indicator when clearing current chat
+            # Stop typing animation/timers and hide indicator
+            try:
+                if self._typing and isinstance(self._typing, dict):
+                    tmr = self._typing.get('timer')
+                    if tmr:
+                        tmr.stop()
+            except Exception:
+                pass
+            self._typing = None
+            try:
+                self._typing_debounce.stop()
+            except Exception:
+                pass
             self._assistant_waiting = False
             try:
                 self.chat.hide_typing()
             except Exception:
                 pass
+            # Cancel backend request tied to this chat
+            try:
+                self._cli.stop_chat()
+            except Exception:
+                pass
+            self._chat_started = False
+            self._current_chat = None
+            self._messages = []
             while self.chat._v.count() > 1:
                 w = self.chat._v.itemAt(0).widget()
                 if w:
@@ -764,6 +807,26 @@ class MainWindow(QMainWindow):
                     self._inflight_queue.remove(cid)
             except Exception:
                 pass
+        else:
+            # If deleting a non-current chat that still has pending/inflight, cancel backend and clear counters
+            pending = False
+            try:
+                pending = int(self._waiting_by_chat.get(cid, 0)) > 0 or (cid in self._inflight_queue)
+            except Exception:
+                pending = True
+            if pending:
+                try:
+                    self._cli.stop_chat()
+                except Exception:
+                    pass
+                self._chat_started = False
+                try:
+                    if cid in self._waiting_by_chat:
+                        self._waiting_by_chat.pop(cid, None)
+                    if cid in self._inflight_queue:
+                        self._inflight_queue.remove(cid)
+                except Exception:
+                    pass
         self._load_chats()
     def _delete_chats_by_ids(self, ids: List[str]) -> None:
         if not ids:
@@ -774,6 +837,36 @@ class MainWindow(QMainWindow):
                 storage.delete_chat(cid)
             except Exception:
                 pass
+        # If deleting the current chat or any chat with pending work, stop typing and cancel backend
+        try:
+            any_pending = any(int(self._waiting_by_chat.get(cid, 0)) > 0 or (cid in self._inflight_queue) for cid in ids)
+        except Exception:
+            any_pending = True if clear_view else False
+        if clear_view or any_pending:
+            # Stop typing animation/timers and hide indicator
+            try:
+                if self._typing and isinstance(self._typing, dict):
+                    tmr = self._typing.get('timer')
+                    if tmr:
+                        tmr.stop()
+            except Exception:
+                pass
+            self._typing = None
+            try:
+                self._typing_debounce.stop()
+            except Exception:
+                pass
+            self._assistant_waiting = False
+            try:
+                self.chat.hide_typing()
+            except Exception:
+                pass
+            # Cancel backend request
+            try:
+                self._cli.stop_chat()
+            except Exception:
+                pass
+            self._chat_started = False
         if clear_view:
             self._current_chat = None
             self._messages = []
@@ -1862,7 +1955,11 @@ class MainWindow(QMainWindow):
             return
         self.entry.clear()
         now_iso = datetime.now().isoformat()
-        self.chat.add_message('user', txt, now_iso)
+        self.chat.add_message('user', txt, now_iso, animate=False)
+        try:
+            self.chat.force_scroll_bottom_deferred()
+        except Exception:
+            pass
         self._messages.append({'role':'user','content':txt,'ts':now_iso})
         storage.save_messages(origin_cid, self._messages)
         self._ensure_chat_started()
@@ -1882,13 +1979,23 @@ class MainWindow(QMainWindow):
                 return
             if self._current_chat != origin_cid:
                 return
-            sticky = False
-            try:
-                sticky = bool(self.chat.is_at_bottom())
-            except Exception:
-                sticky = False
+            # Force initial snap-to-bottom when typing indicator appears
+            sticky = True
             try:
                 self.chat.show_typing(sticky=sticky)
+            except Exception:
+                pass
+            def _scroll_after_typing() -> None:
+                try:
+                    # Lightweight follow-up: try to keep in view if user remained at bottom
+                    if bool(self.chat.is_at_bottom()):
+                        self.chat.scroll_to_bottom()
+                except Exception:
+                    pass
+            try:
+                QTimer.singleShot(0, _scroll_after_typing)
+                QTimer.singleShot(16, _scroll_after_typing)
+                QTimer.singleShot(100, _scroll_after_typing)
             except Exception:
                 pass
         try:
@@ -1992,7 +2099,12 @@ class MainWindow(QMainWindow):
                 sticky = bool(self.chat.is_at_bottom())
             except Exception:
                 sticky = False
-            bubble = self.chat.add_message('assistant', '', now_iso)
+            bubble = self.chat.add_message('assistant', '', now_iso, animate=False)
+            # Ensure the new assistant bubble is brought into view immediately
+            try:
+                self.chat.force_scroll_bottom_deferred()
+            except Exception:
+                pass
             if self._typing and isinstance(self._typing, dict):
                 try:
                     tmr = self._typing.get('timer')
@@ -2023,6 +2135,18 @@ class MainWindow(QMainWindow):
                             storage.save_messages(self._current_chat, self._messages)
                         except Exception:
                             pass
+                    # Unconditional final scroll to bottom after AI message completes
+                    def _scroll_after_ai_done() -> None:
+                        try:
+                            self.chat.scroll_to_bottom()
+                        except Exception:
+                            pass
+                    try:
+                        QTimer.singleShot(0, _scroll_after_ai_done)
+                        QTimer.singleShot(16, _scroll_after_ai_done)
+                        QTimer.singleShot(100, _scroll_after_ai_done)
+                    except Exception:
+                        pass
                     self._typing = None
                     return
                 nxt = min(len(s), idx + step)
@@ -2031,11 +2155,22 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 state['index'] = nxt
-                if state['sticky']:
-                    try:
+                try:
+                    if bool(self.chat.is_at_bottom()):
                         self.chat.scroll_to_bottom()
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
+            # Keep lightweight periodic bottom sync during early layout settles
+            def _scroll_new_assistant() -> None:
+                try:
+                    self.chat.scroll_to_bottom()
+                except Exception:
+                    pass
+            try:
+                QTimer.singleShot(0, _scroll_new_assistant)
+                QTimer.singleShot(16, _scroll_new_assistant)
+            except Exception:
+                pass
             timer.timeout.connect(_tick)
             self._typing = state
             timer.start()
