@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import re
 import threading
+import os
+import subprocess
 from PySide6.QtCore import Qt, QObject, Signal, QSize, QEvent, QPoint, QRect, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QListWidget, QListWidgetItem, QToolBar, QComboBox, QPushButton, QLineEdit, QTextEdit, QToolButton, QStyle, QGraphicsDropShadowEffect, QSizePolicy, QMenu, QInputDialog, QStackedLayout, QStyleOption, QStyleOptionFrame, QProxyStyle, QAbstractItemView, QMessageBox, QScrollBar, QProgressDialog, QProgressBar
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap
@@ -22,10 +24,11 @@ class _Bridge(QObject):
     dl_done = Signal(bool)
     rm_line = Signal(str)
     rm_done = Signal(bool)
+    device_update = Signal()
 
 class MainWindow(QMainWindow):
     """Qt main window replicating the app with modern layout/colors."""
-    def __init__(self) -> None:
+    def __init__(self, init_backend: Optional[str] = None, init_model: Optional[str] = None) -> None:
         super().__init__()
         self.setWindowTitle('Local AI Chat')
         try:
@@ -52,6 +55,10 @@ class MainWindow(QMainWindow):
         self._bridge.dl_done.connect(self._on_download_done)
         self._bridge.rm_line.connect(self._on_delete_output)
         self._bridge.rm_done.connect(self._on_delete_done)
+        try:
+            self._bridge.device_update.connect(self._update_device_label)
+        except Exception:
+            pass
         self._dl_dialog = None
         self._dl_size_str: Optional[str] = None
         self._dl_model: Optional[str] = None
@@ -87,7 +94,11 @@ class MainWindow(QMainWindow):
         self._waiting_by_chat: Dict[str, int] = {}
         self._inflight_queue = deque()  # type: deque[str]
         # Device backend detection state
-        self._device_backend: Optional[str] = None
+        self._device_backend: Optional[str] = init_backend or 'CPU'
+        self._device_model: Optional[str] = init_model
+        self._gpu_debug = deque(maxlen=12)
+        self._model_probe_started: bool = False
+        self._startup_probe_done: bool = False
         def _apply_small_shadow(w):
             """Apply a small drop shadow to a widget."""
             eff = QGraphicsDropShadowEffect(self)
@@ -200,19 +211,39 @@ class MainWindow(QMainWindow):
         _apply_small_shadow(delm_btn)
         tb.addWidget(ref_tb)
         tb.addWidget(delm_btn)
-        # Device backend label (updated from CLI output)
+        # Device backend labels (updated from CLI output)
         try:
             _sp_dev_l = QWidget(); _sp_dev_l.setFixedWidth(10)
             tb.addWidget(_sp_dev_l)
         except Exception:
             pass
-        self.device_label = QLabel('Acceleration: ---')
+        self.device_title_label = QLabel('<b>Hardware<br>Acceleration</b>')
         try:
-            self.device_label.setObjectName('DeviceLabel')
-            self.device_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            self.device_title_label.setObjectName('DeviceLabelTitle')
+            self.device_title_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+            self.device_title_label.setTextFormat(Qt.RichText)
         except Exception:
             pass
-        tb.addWidget(self.device_label)
+        tb.addWidget(self.device_title_label)
+        try:
+            _sp_dev_mid = QWidget(); _sp_dev_mid.setFixedWidth(6)
+            tb.addWidget(_sp_dev_mid)
+        except Exception:
+            pass
+        self.device_value_label = QLabel('---')
+        try:
+            # Keep legacy CSS name for styling consistency
+            self.device_value_label.setObjectName('DeviceLabel')
+            self.device_value_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            self.device_value_label.setTextFormat(Qt.RichText)
+        except Exception:
+            pass
+        tb.addWidget(self.device_value_label)
+        # Set an immediate baseline so the UI never shows '---'
+        try:
+            self.device_value_label.setText('CPU')
+        except Exception:
+            pass
         # Push following items to the far right
         try:
             _spacer = QWidget(); _spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -367,8 +398,25 @@ class MainWindow(QMainWindow):
             self._refresh_models()
         except Exception:
             pass
+        # Kick immediate startup GPU probe only if GPU backend present but model missing
+        try:
+            be_low = (self._device_backend or '').lower()
+            if 'gpu' in be_low and not self._device_model:
+                QTimer.singleShot(0, self._startup_device_probe)
+        except Exception:
+            pass
         # Data
         self._load_chats()
+        # Ensure an initial baseline label (CPU) is shown before any detection results
+        try:
+            self._update_device_label()
+        except Exception:
+            pass
+        # Defer a second update to ensure UI is fully constructed before updating the label
+        try:
+            QTimer.singleShot(0, self._update_device_label)
+        except Exception:
+            pass
     def _on_chatlist_context_menu(self, pos: QPoint) -> None:
         try:
             menu = QMenu(self.list)
@@ -906,11 +954,13 @@ class MainWindow(QMainWindow):
             self._model = None
             return
         self._model = s
-        # Reset device label on model change
+        # Reset device labels on model change
         try:
             self._device_backend = None
-            if hasattr(self, 'device_label') and self.device_label is not None:
-                self.device_label.setText('Acceleration: ---')
+            self._device_model = None
+            self._model_probe_started = False
+            if hasattr(self, 'device_value_label') and self.device_value_label is not None:
+                self.device_value_label.setText('---')
         except Exception:
             pass
         # If model isn't downloaded, prompt to download with progress
@@ -931,19 +981,63 @@ class MainWindow(QMainWindow):
         self._chat_started = False
 
     def _on_raw(self, line: str) -> None:
-        """Parse raw CLI output lines to detect and display the active device backend."""
+        """Parse raw CLI output lines to detect backend and GPU model, then update label."""
+        new_backend = None
+        new_model = None
+        # Always collect potential GPU-related lines for tooltip diagnostics
         try:
-            name = self._detect_device_backend(line)
+            self._maybe_collect_gpu_debug(line)
         except Exception:
-            name = None
-        if not name:
-            return
-        if name == self._device_backend:
-            return
-        self._device_backend = name
+            pass
         try:
-            if hasattr(self, 'device_label') and self.device_label is not None:
-                self.device_label.setText(f'Acceleration: {name}')
+            new_backend = self._detect_device_backend(line)
+        except Exception:
+            new_backend = None
+        try:
+            new_model = self._detect_device_model(line)
+        except Exception:
+            new_model = None
+        # Fallback: if GUI regex didn't extract a backend, try the CLI's internal detector
+        if not new_backend and not self._device_backend:
+            try:
+                cli_backend = self._cli.get_device_backend()
+                if cli_backend:
+                    new_backend = cli_backend
+            except Exception:
+                pass
+        # Fallback: if GUI regex didn't extract a model, try the CLI's internal detector
+        if not new_model and not self._device_model:
+            try:
+                cli_model = self._cli.get_device_model()
+                if cli_model:
+                    new_model = cli_model
+            except Exception:
+                pass
+        changed = False
+        # Do not downgrade from a known GPU backend to CPU based on weak/early lines
+        try:
+            cur_be = self._device_backend or ''
+            cur_is_gpu = 'gpu' in cur_be.lower()
+            new_is_gpu = 'gpu' in (new_backend.lower() if new_backend else '')
+            if new_backend and cur_is_gpu and not new_is_gpu:
+                new_backend = None
+        except Exception:
+            pass
+        if new_backend and new_backend != self._device_backend:
+            self._device_backend = new_backend
+            changed = True
+        if new_model and new_model != self._device_model:
+            self._device_model = new_model
+            changed = True
+        # If currently no model but GPU backend is known, kick off a system-level probe once
+        try:
+            self._maybe_kick_model_probe()
+        except Exception:
+            pass
+        if not changed:
+            return
+        try:
+            self._update_device_label()
         except Exception:
             pass
 
@@ -970,6 +1064,60 @@ class MainWindow(QMainWindow):
             return self._normalize_backend_name(txt)
         return None
 
+    def _detect_device_model(self, s: str) -> Optional[str]:
+        """Extract a GPU model name from CLI output when present."""
+        try:
+            txt = (s or '').strip()
+        except Exception:
+            txt = s or ''
+        if not txt:
+            return None
+        low = txt.lower()
+        pats = [
+            # Selected/using adapter or device with explicit separator
+            re.compile(r"(?:selected|using)\s+(?:cuda\s+|d3d12\s+)?(?:adapter|device)\s*[:=]\s*['\"]?(.+?)['\"]?(?:\s|$)", re.IGNORECASE),
+            # CUDA/DirectML mentions with device/gpu and a separator
+            re.compile(r"(?:cuda|nvidia).*(?:device|gpu)\s*[:=]\s*['\"]?(.+?)['\"]?(?:\s|$)", re.IGNORECASE),
+            re.compile(r"(?:directml|dml).*(?:device)\s*[:=]\s*['\"]?(.+?)['\"]?(?:\s|$)", re.IGNORECASE),
+            # 'device 0: NVIDIA GeForce ...' or 'adapter-1 - AMD Radeon ...'
+            re.compile(r"(?:adapter|device)\s*\d*\s*[:\-]\s*['\"]?(.+?)['\"]?(?:\s|$)", re.IGNORECASE),
+            # Using/Selected device without separator
+            re.compile(r"(?:using|selected)\s+(?:cuda\s+|d3d12\s+)?(?:device|adapter)\s+(?:\d+\s*)?['\"]?(.+?)['\"]?(?:\s|$)", re.IGNORECASE),
+            # Generic adapter/device line that already starts with a vendor
+            re.compile(r"(?:adapter|device)\s*[:=]\s*(NVIDIA.+|AMD.+|Intel.+)$", re.IGNORECASE),
+            # Variants like "device 0: NVIDIA GeForce ..." or "gpu-0 - NVIDIA ..."
+            re.compile(r"(?:device|gpu)\s*[-:]?\s*\d+\s*[-:]\s*(NVIDIA.+|AMD.+|Intel.+)$", re.IGNORECASE),
+            # Key-value with name: NVIDIA ...
+            re.compile(r"\bname\s*[:=]\s*(NVIDIA.+|AMD.+|Intel.+)$", re.IGNORECASE),
+            # Bracketed adapter lines e.g., "Adapter 0: NVIDIA ... (PCI...)"
+            re.compile(r"Adapter\s*\d+\s*[:-]\s*(NVIDIA.+|AMD.+|Intel.+)", re.IGNORECASE),
+        ]
+        for r in pats:
+            m = r.search(txt)
+            if m:
+                return self._clean_model_name(m.group(1))
+        if any(k in low for k in ('nvidia','geforce','quadro','tesla','amd','radeon','vega','intel','arc','iris')) and any(k in low for k in ('gpu','adapter','device','directml','dml','cuda','rocm','metal','mps')):
+            m2 = re.search(r"(NVIDIA\s+.+|AMD\s+.+|Intel\s+.+)", txt, re.IGNORECASE)
+            if m2:
+                return self._clean_model_name(m2.group(1))
+        return None
+
+    def _clean_model_name(self, val: str) -> str:
+        """Normalize raw adapter string to a concise GPU model name."""
+        s = (val or '').strip().strip('\"\'')
+        # Drop leading index/prefix like "Adapter 0:" or "Device-1:"
+        try:
+            s = re.sub(r"^(?:adapter|device)?\s*\d+\s*[:\-]\s*", "", s, flags=re.IGNORECASE)
+        except Exception:
+            pass
+        # Preserve parentheses content (e.g., CUDA version); trim brackets and common separators (also comma)
+        s = re.split(r"\s*\[|\s\|\s|\s-\s|\s@\s|,", s)[0].strip()
+        # Strip common trailing punctuation/brackets
+        s = s.rstrip(")]:;,.")
+        s = s.replace('(TM)', '').replace('(R)', '').replace('®', '').replace('™', '').strip()
+        s = re.sub(r"\s+", " ", s)
+        return s
+
     def _normalize_backend_name(self, raw: str) -> Optional[str]:
         """Map arbitrary device strings into a concise label."""
         low = (raw or '').lower()
@@ -988,6 +1136,280 @@ class MainWindow(QMainWindow):
         if 'gpu' in low:
             return 'GPU'
         return None
+
+    def _startup_device_probe(self) -> None:
+        """Quick, non-blocking GPU probe at startup to show model/backend immediately."""
+        if self._startup_probe_done:
+            return
+        self._startup_probe_done = True
+        def _run():
+            name = None
+            try:
+                try:
+                    self._gpu_debug.append("[probe] startup GPU quick probe")
+                except Exception:
+                    pass
+                try:
+                    self._gpu_debug.append("[probe] trying nvidia-smi")
+                except Exception:
+                    pass
+                name = self._try_nvidia_smi()
+                if not name and os.name == 'nt':
+                    try:
+                        self._gpu_debug.append("[probe] trying PowerShell WMI (startup)")
+                    except Exception:
+                        pass
+                    # Prefer NVIDIA first
+                    name = self._try_powershell_gpu_names(prefer='nvidia') or self._try_powershell_gpu_names()
+            except Exception:
+                name = None
+            if name:
+                try:
+                    clean = self._clean_model_name(name)
+                except Exception:
+                    clean = name
+                try:
+                    if not self._device_model:
+                        self._device_model = clean
+                    # Infer backend from vendor if not already GPU
+                    low = (clean or '').lower()
+                    be_low = (self._device_backend or '').lower()
+                    if 'gpu' not in be_low:
+                        if 'nvidia' in low:
+                            self._device_backend = 'CUDA GPU'
+                        elif os.name == 'nt' and ('amd' in low or 'radeon' in low or 'intel' in low or 'arc' in low or 'iris' in low):
+                            self._device_backend = 'DirectML GPU'
+                    try:
+                        self._gpu_debug.append(f"[probe] {name}")
+                    except Exception:
+                        pass
+                    self._bridge.device_update.emit()
+                except Exception:
+                    try:
+                        self._bridge.device_update.emit()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self._gpu_debug.append("[probe] no GPU name found at startup")
+                except Exception:
+                    pass
+                try:
+                    if not self._device_backend:
+                        self._device_backend = 'CPU'
+                except Exception:
+                    pass
+                try:
+                    self._bridge.device_update.emit()
+                except Exception:
+                    pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    def _maybe_kick_model_probe(self) -> None:
+        """Start a background system probe to get GPU model if backend is GPU but model is missing."""
+        if self._model_probe_started:
+            return
+        be = (self._device_backend or '').lower()
+        if not be:
+            return
+        if 'gpu' not in be:
+            return
+        if self._device_model:
+            return
+        self._model_probe_started = True
+        def _run():
+            name = None
+            try:
+                try:
+                    self._gpu_debug.append("[probe] starting GPU name probe")
+                except Exception:
+                    pass
+                if 'cuda' in be or 'nvidia' in be:
+                    try:
+                        self._gpu_debug.append("[probe] trying nvidia-smi")
+                    except Exception:
+                        pass
+                    name = self._try_nvidia_smi()
+                if not name:
+                    try:
+                        self._gpu_debug.append("[probe] trying PowerShell WMI")
+                    except Exception:
+                        pass
+                    name = self._try_powershell_gpu_names(prefer='nvidia' if 'cuda' in be or 'nvidia' in be else None)
+                if not name:
+                    try:
+                        self._gpu_debug.append("[probe] trying WMIC fallback")
+                    except Exception:
+                        pass
+                    name = self._try_wmic_gpu_names(prefer='nvidia' if 'cuda' in be or 'nvidia' in be else None)
+            except Exception:
+                name = None
+            if name:
+                try:
+                    clean = self._clean_model_name(name)
+                except Exception:
+                    clean = name
+                try:
+                    if not self._device_model:
+                        self._device_model = clean
+                        self._gpu_debug.append(f"[probe] {name}")
+                        self._bridge.device_update.emit()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._gpu_debug.append("[probe] no GPU name found")
+                    self._bridge.device_update.emit()
+                except Exception:
+                    pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    def _try_nvidia_smi(self) -> Optional[str]:
+        """Return first NVIDIA GPU name via nvidia-smi, if available."""
+        try:
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+            cp = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', timeout=3, check=False, creationflags=flags)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+        out = (cp.stdout or '').strip().splitlines()
+        if out:
+            s = out[0].strip()
+            return s or None
+        return None
+
+    def _try_powershell_gpu_names(self, prefer: Optional[str] = None) -> Optional[str]:
+        """Return a GPU name via PowerShell WMI (Win32_VideoController). Prefer vendor when specified."""
+        if os.name != 'nt':
+            return None
+        try:
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            exe_list = ["powershell", "pwsh"]
+            names = []
+            for exe in exe_list:
+                try:
+                    cmd = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"]
+                    cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', timeout=5, check=False, creationflags=flags)
+                    out = [x.strip() for x in (cp.stdout or '').splitlines() if x.strip()]
+                    if out:
+                        names = out
+                        break
+                except FileNotFoundError:
+                    continue
+        except Exception:
+            names = []
+        if not names:
+            return None
+        # Filter out Microsoft Basic Display/Render drivers
+        filt = [n for n in names if 'microsoft' not in n.lower()]
+        cand = filt or names
+        if prefer:
+            pref = [n for n in cand if prefer.lower() in n.lower()]
+            if pref:
+                return pref[0]
+        # Otherwise choose by vendor priority
+        for v in ('NVIDIA', 'AMD', 'Intel'):
+            for n in cand:
+                if v.lower() in n.lower():
+                    return n
+        return cand[0] if cand else None
+
+    def _try_wmic_gpu_names(self, prefer: Optional[str] = None) -> Optional[str]:
+        """Return a GPU name via legacy WMIC if available."""
+        if os.name != 'nt':
+            return None
+        try:
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            cp = subprocess.run(["wmic", "path", "win32_VideoController", "get", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', timeout=5, check=False, creationflags=flags)
+            lines = [x.strip() for x in (cp.stdout or '').splitlines() if x.strip()]
+            if not lines:
+                return None
+            # Remove header if present
+            if lines and lines[0].lower() == 'name':
+                lines = lines[1:]
+            names = [x for x in lines if x]
+        except Exception:
+            names = []
+        if not names:
+            return None
+        filt = [n for n in names if 'microsoft' not in n.lower()]
+        cand = filt or names
+        if prefer:
+            pref = [n for n in cand if prefer.lower() in n.lower()]
+            if pref:
+                return pref[0]
+        for v in ('NVIDIA', 'AMD', 'Intel'):
+            for n in cand:
+                if v.lower() in n.lower():
+                    return n
+        return cand[0] if cand else None
+
+    def _update_device_label(self) -> None:
+        """Update the device value label with GPU/CPU and model; GPU shows on two lines."""
+        if not hasattr(self, 'device_value_label') or self.device_value_label is None:
+            return
+        backend = self._device_backend or ''
+        model = self._device_model or ''
+        is_gpu = 'gpu' in backend.lower() if backend else False
+        if is_gpu and not model:
+            try:
+                self._maybe_kick_model_probe()
+            except Exception:
+                pass
+        # Always render a compact label: GPU or CPU
+        text = 'GPU' if is_gpu else 'CPU'
+        try:
+            self.device_value_label.setText(text)
+        except Exception:
+            pass
+        try:
+            tips: list[str] = []
+            if is_gpu:
+                if backend:
+                    tips.append(f"Backend: {backend}")
+                if model:
+                    tips.append(f"Model: {model}")
+                if self._gpu_debug:
+                    tips.append("Samples:")
+                    tips.extend(list(self._gpu_debug))
+                if not tips:
+                    tips.append('GPU acceleration is active.')
+            else:
+                tips.append('Running on CPU. If your computer has a GPU, please ensure NVIDIA drivers and CUDA are installed. Using GPU acceleration should result in faster responses.')
+            self.device_value_label.setToolTip("\n".join(tips))
+        except Exception:
+            pass
+
+    def _maybe_collect_gpu_debug(self, s: str) -> None:
+        """Collect GPU-related lines to help refine detection regex and show in tooltip."""
+        try:
+            txt = (s or '').strip()
+        except Exception:
+            txt = s or ''
+        if not txt:
+            return
+        low = txt.lower()
+        # Exclude noisy cache/download lines
+        if ('model ' in low and 'found in the local cache' in low) or any(k in low for k in ('downloading','verifying','extracting','fetching')):
+            return
+        # Collect broadly: vendor OR device context keywords
+        if any(k in low for k in ('nvidia','geforce','quadro','tesla','amd','radeon','vega','intel','arc','iris','gpu','adapter','device','directml','dml','cuda','rocm','metal','mps')):
+            try:
+                self._gpu_debug.append(txt)
+                if hasattr(self, 'device_value_label') and self.device_value_label is not None:
+                    tips: list[str] = []
+                    if self._device_backend:
+                        tips.append(f"Backend: {self._device_backend}")
+                    if self._device_model:
+                        tips.append(f"Model: {self._device_model}")
+                    tips.append("Samples:")
+                    tips.extend(list(self._gpu_debug))
+                    self.device_value_label.setToolTip("\n".join(tips))
+            except Exception:
+                pass
     def _select_chat_by_id(self, cid: str) -> None:
         """Select the list row corresponding to the given chat id."""
         try:

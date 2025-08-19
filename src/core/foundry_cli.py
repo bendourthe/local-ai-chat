@@ -26,6 +26,7 @@ class FoundryCLI:
         self._stop_event = threading.Event()
         self._buffer = ""
         self._device_backend: Optional[str] = None
+        self._device_model: Optional[str] = None
 
     def is_installed(self) -> bool:
         """Return True if the `foundry` command is available."""
@@ -145,11 +146,19 @@ class FoundryCLI:
         self._stop_event.clear()
         self._buffer = ""
         self._device_backend = None
+        self._device_model = None
         args = ["foundry", "model", "run", model]
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, creationflags=flags)
         def _reader() -> None:
             acc: list[str] = []
+            # Fallback mode accumulates raw assistant-looking lines before structured blocks are detected.
+            # We disable it by default to avoid leaking chain-of-thought. Enable only with env var for debugging.
+            debug_env = os.getenv('LOCAL_CHAT_DEBUG_ASSISTANT_STREAM', '')
+            try:
+                fallback_allowed = bool(re.match(r"^(1|true|yes|on)$", (debug_env or '').strip(), re.IGNORECASE))
+            except Exception:
+                fallback_allowed = False
             ignore_res = [
                 re.compile(r"^Interactive Chat", re.IGNORECASE),
                 re.compile(r"^Interactive mode", re.IGNORECASE),
@@ -174,7 +183,7 @@ class FoundryCLI:
             prompt_res = re.compile(r"Interactive mode|enter your prompt|^\s*>\s*$", re.IGNORECASE)
             start_res = re.compile(r"Interactive Chat|Interactive mode|Enter /\?|^\s*>\s*$", re.IGNORECASE)
             last_flush = time.time()
-            use_fallback = True  # Fallback only until we detect structured assistant blocks
+            use_fallback = bool(fallback_allowed)  # Only allow fallback when explicitly enabled
             def flush_acc() -> None:
                 # Only flush fallback content if we're still in fallback mode
                 if not use_fallback:
@@ -221,6 +230,10 @@ class FoundryCLI:
                         name = self._detect_device_backend(s)
                         if name:
                             self._device_backend = name
+                    if self._device_model is None:
+                        model_name = self._detect_device_model(s)
+                        if model_name:
+                            self._device_model = model_name
                 except Exception:
                     pass
                 if s.strip() == "":
@@ -254,6 +267,9 @@ class FoundryCLI:
     def get_device_backend(self) -> Optional[str]:
         """Return the last detected device backend name (e.g., 'CUDA GPU', 'DirectML GPU', 'CPU')."""
         return self._device_backend
+    def get_device_model(self) -> Optional[str]:
+        """Return the detected GPU model string if available (e.g., 'NVIDIA GeForce RTX 3080')."""
+        return self._device_model
     def _detect_device_backend(self, s: str) -> Optional[str]:
         """Return a normalized accelerator name if a line indicates device backend."""
         txt = (s or '').strip()
@@ -269,6 +285,40 @@ class FoundryCLI:
         if any(k in low for k in ('cuda','directml',' dml ','rocm','mps','metal','openvino')):
             return self._normalize_backend_name(txt)
         return None
+    def _detect_device_model(self, s: str) -> Optional[str]:
+        """Attempt to extract a detailed GPU model name from CLI output lines."""
+        txt = (s or '').strip()
+        if not txt:
+            return None
+        low = txt.lower()
+        # Common patterns that include explicit adapter/device label
+        pats = [
+            re.compile(r"(?:selected|using)\s+(?:d3d12\s+)?(?:adapter|device)\s*[:=]\s*['\"]?(.+?)['\"]?$", re.IGNORECASE),
+            re.compile(r"(?:cuda|nvidia).*(?:device|gpu)\s*[:=]\s*['\"]?(.+?)['\"]?$", re.IGNORECASE),
+            re.compile(r"(?:directml|dml).*(?:device)\s*[:=]\s*['\"]?(.+?)['\"]?$", re.IGNORECASE),
+            re.compile(r"(?:adapter|device)\s*[:=]\s*(NVIDIA.+|AMD.+|Intel.+)$", re.IGNORECASE),
+        ]
+        for r in pats:
+            m = r.search(txt)
+            if m:
+                val = m.group(1).strip()
+                return self._clean_model_name(val)
+        # Heuristic: if a line mentions a known vendor and GPU context, capture substring from vendor
+        if any(k in low for k in ('nvidia','geforce','quadro','tesla','amd','radeon','vega','intel','arc','iris')) and any(k in low for k in ('gpu','adapter','device','directml','dml','cuda','rocm','metal','mps')):
+            m2 = re.search(r"(NVIDIA\s+.+|AMD\s+.+|Intel\s+.+)", txt, re.IGNORECASE)
+            if m2:
+                return self._clean_model_name(m2.group(1))
+        return None
+    def _clean_model_name(self, val: str) -> str:
+        """Normalize a raw adapter string to a concise GPU model name."""
+        s = (val or '').strip().strip('\"\'')
+        # Cut off trailing descriptors like memory, driver, or brackets/parentheses
+        s = re.split(r"\s*[\[(]|\s\|\s|\s-\s|\s@\s", s)[0].strip()
+        # Remove trademark symbols
+        s = s.replace('(TM)', '').replace('(R)', '').replace('®', '').replace('™', '').strip()
+        # Collapse whitespace
+        s = re.sub(r"\s+", " ", s)
+        return s
     def _normalize_backend_name(self, raw: str) -> Optional[str]:
         """Map arbitrary device strings into a concise label."""
         low = (raw or '').lower()

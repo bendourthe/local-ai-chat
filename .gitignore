@@ -1,9 +1,25 @@
+# Python virtual environments
 .venv/
+venv/
+env/
+
+# Python bytecode/cache
 __pycache__/
-*.spec
-dist/
+*.py[cod]
+
+# Build artifacts
 build/
+dist/
+*.spec
+
+# Logs
 *.log
+
+# Application data
 .data/
-*.pyc
 .data_tmp/
+
+# Packaging metadata
+*.egg-info/
+.eggs/
+pip-wheel-metadata/

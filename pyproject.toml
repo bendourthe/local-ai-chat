@@ -34,6 +34,7 @@ local-ai-chat = "main:run_app"
 
 [tool.setuptools]
 include-package-data = true
+py-modules = ["main"]
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -42,5 +43,3 @@ include-package-data = true
 where = ["src"]
 
 # main.py is a top-level module under src/
-[tool.setuptools.py-modules]
-py-modules = ["main"]

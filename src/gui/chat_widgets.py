@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import re
 from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QFont, QPen, QFontMetrics
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea, QSizePolicy, QGraphicsDropShadowEffect
@@ -61,8 +62,8 @@ class Bubble(QFrame):
         # Visibility flags (default True)
         self._show_role = True
         self._show_ts = True
-    def _natural_content_width(self) -> int:
-        """Return width in pixels of the longer of header or single-line message, including bubble padding."""
+    def _natural_content_width(self, max_w_hint: int | None = None) -> int:
+        """Return min(max(headerWidth, contentWidth), maxWidthHint) without extra heuristics."""
         try:
             pad = 24
             spc = 8
@@ -72,9 +73,23 @@ class Bubble(QFrame):
             w_ts = fm_ts.horizontalAdvance(self._ts_label.text()) if self._ts_label.isVisible() else 0
             w_header = w_sender + (spc if (w_sender and w_ts) else 0) + w_ts + pad
             fm_msg = QFontMetrics(self._msg_label.font())
-            txt = (self._msg_label.text() or '').replace('\n', ' ')
-            w_msg = fm_msg.horizontalAdvance(txt) + pad
-            return max(w_header, w_msg)
+            raw = (self._msg_label.text() or '')
+            try:
+                raw = re.sub(r'(?i)<br\s*/?>', '\n', raw)
+            except Exception:
+                pass
+            first = raw.split('\n', 1)[0]
+            if '<' in first or '&' in first:
+                try:
+                    first = re.sub(r'<[^>]*>', '', first)
+                    first = first.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+                except Exception:
+                    pass
+            w_msg = fm_msg.horizontalAdvance(first) + pad
+            want = max(w_header, w_msg)
+            if isinstance(max_w_hint, int) and max_w_hint > 0:
+                return min(want, max_w_hint)
+            return want
         except Exception:
             return 260
     def apply_width(self, min_w: int, max_w: int) -> None:
@@ -88,7 +103,7 @@ class Bubble(QFrame):
                     self._msg_label.setMaximumWidth(inner_max)
                 except Exception:
                     pass
-            nat = self._natural_content_width()
+            nat = self._natural_content_width(max_w)
             # Preferred width is the natural width clamped to max_w and not below min_w
             pref = nat
             if max_w and max_w > 0:
@@ -164,6 +179,14 @@ class Bubble(QFrame):
         except Exception:
             pass
 
+    def set_markdown(self, enabled: bool) -> None:
+        """Enable or disable Markdown rendering for the message label."""
+        try:
+            self._msg_label.setTextFormat(Qt.MarkdownText if bool(enabled) else Qt.PlainText)
+            self._msg_label.setText(self._msg_label.text())
+        except Exception:
+            pass
+
 class ChatView(QScrollArea):
     """Scrollable chat view that stacks Bubble widgets left/right."""
     def __init__(self) -> None:
@@ -226,6 +249,10 @@ class ChatView(QScrollArea):
             bubble.set_show_timestamp(bool(self._show_ts))
         except Exception:
             pass
+        try:
+            bubble.set_markdown(True)
+        except Exception:
+            pass
         # Apply initial min/max width based on viewport
         try:
             mn, mx = self._bubble_widths()
@@ -256,14 +283,14 @@ class ChatView(QScrollArea):
         anim.start()
         return bubble
     def _bubble_widths(self) -> tuple[int, int]:
-        """Compute (min_w, max_w) based on current viewport size: min 0, max 75% of chat area width."""
+        """Compute (min_w, max_w) based on current viewport size: min 20%, max 75% of chat area width."""
         try:
             vw = self.viewport().width()
         except Exception:
             vw = 800
         # Clamp to sensible pixel bounds for max only
         max_w = max(240, int(vw * 0.75))
-        min_w = 0
+        min_w = int(vw * 0.20)
         return (min_w, max_w)
     def _apply_bubble_widths(self) -> None:
         """Apply current max width to all bubbles (call on resize)."""
@@ -333,6 +360,11 @@ class ChatView(QScrollArea):
                 for j in range(lay.count()):
                     cw = lay.itemAt(j).widget()
                     if isinstance(cw, Bubble):
+                        try:
+                            if bool(cw.property('typing')):
+                                continue
+                        except Exception:
+                            pass
                         cw.set_show_timestamp(self._show_ts)
                         break
         except Exception:
@@ -351,39 +383,46 @@ class ChatView(QScrollArea):
         else:
             # Build a minimal AI bubble and insert it
             dt = datetime.now()
-            bubble = Bubble('', False, self._fmt_time(dt))
+            bubble = Bubble('', False, '')
             try:
-                bubble.set_show_role(bool(self._show_role))
-                bubble.set_show_timestamp(bool(self._show_ts))
+                bubble.setProperty('typing', True)
             except Exception:
                 pass
             try:
-                mn, mx = self._bubble_widths()
-                bubble.apply_width(mn, mx)
+                bubble.set_show_role(True)
+            except Exception:
+                pass
+            try:
+                bubble.set_show_timestamp(False)
             except Exception:
                 pass
             line = QHBoxLayout()
             line.setContentsMargins(0,0,0,0)
             line.setSpacing(6)
+            # Left-aligned like AI messages
             line.addWidget(bubble)
             line.addStretch(1)
             cont = QFrame()
             cont.setLayout(line)
             try:
                 bubble.setAccessibleName('Assistant is typing')
-                cont.setAccessibleName('Assistant is typing')
             except Exception:
                 pass
             self._v.insertWidget(self._v.count()-1, cont)
             self._typing_cont = cont
             self._typing_bubble = bubble
-        # Animate dots
+        # Animate 3 grey dots with one white dot cycling left-to-right
         def _tick() -> None:
-            self._typing_step = (self._typing_step + 1) % 4
-            dots = '•' * (self._typing_step or 1)
+            active = self._typing_step
+            self._typing_step = (self._typing_step + 1) % 3
+            parts = []
             try:
+                for i in range(3):
+                    color = '#FFFFFF' if i == active else '#A0A0A0'
+                    parts.append(f'<span style="color:{color}">•</span>')
+                html = '&nbsp;'.join(parts)
                 if self._typing_bubble is not None:
-                    self._typing_bubble.set_text(dots)
+                    self._typing_bubble.set_text(html)
             except Exception:
                 pass
             if sticky:
@@ -403,7 +442,7 @@ class ChatView(QScrollArea):
             return
         if self._typing_timer is None:
             self._typing_timer = QTimer(self)
-            self._typing_timer.setInterval(350)
+            self._typing_timer.setInterval(180)
             self._typing_timer.timeout.connect(_tick)
         else:
             try:
@@ -411,6 +450,10 @@ class ChatView(QScrollArea):
             except Exception:
                 pass
             self._typing_timer.timeout.connect(_tick)
+        try:
+            _tick()
+        except Exception:
+            pass
         self._typing_timer.start()
         # Smooth scroll to bottom when first shown
         if sticky:
