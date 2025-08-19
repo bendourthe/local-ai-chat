@@ -7,7 +7,7 @@ import os
 import subprocess
 from PySide6.QtCore import Qt, QObject, Signal, QSize, QEvent, QPoint, QRect, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QListWidget, QListWidgetItem, QToolBar, QComboBox, QPushButton, QLineEdit, QTextEdit, QToolButton, QStyle, QGraphicsDropShadowEffect, QSizePolicy, QMenu, QInputDialog, QStackedLayout, QStyleOption, QStyleOptionFrame, QProxyStyle, QAbstractItemView, QMessageBox, QScrollBar, QProgressDialog, QProgressBar
-from PySide6.QtGui import QFont, QColor, QIcon, QPixmap
+from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QPen, QBrush
 from PySide6 import QtSvg
 from .styles import QSS, APP_BG, PANEL_BG, SIDEBAR_BG, ACCENT, TEXT, INPUT_BAR_BG, CHAT_AREA_BG
 from . import styles
@@ -15,6 +15,58 @@ from .settings_dialog import SettingsDialog
 from .chat_widgets import ChatView
 from core.foundry_cli import FoundryCLI
 from core import storage
+from core.tokens import estimate_messages_tokens, estimate_tokens
+
+class _ContextProgressBar(QWidget):
+    """Compact horizontal progress bar with a vertical threshold indicator."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0
+        self._threshold = 80
+        self.setFixedHeight(12)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setObjectName('ContextProgressBar')
+        try:
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        except Exception:
+            pass
+    def set_value(self, v: int) -> None:
+        """Set progress percentage [0..100]."""
+        v = max(0, min(100, int(v)))
+        if v != self._value:
+            self._value = v
+            self.update()
+    def set_threshold(self, t: int) -> None:
+        """Set threshold percentage [0..100]."""
+        t = max(0, min(100, int(t)))
+        if t != self._threshold:
+            self._threshold = t
+            self.update()
+    def paintEvent(self, _e) -> None:
+        r = self.rect()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # Track background
+        track = QColor(255, 255, 255, 22)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(track))
+        radius = 5
+        p.drawRoundedRect(r.adjusted(0, 2, 0, -2), radius, radius)
+        # Progress fill
+        w = max(0, int(r.width() * (self._value / 100.0)))
+        pr = QRect(r.left(), r.top() + 2, w, max(1, r.height() - 4))
+        over = self._value >= self._threshold and self._threshold > 0
+        fill = QColor(139, 0, 0) if over else QColor(ACCENT)
+        p.setBrush(QBrush(fill))
+        p.drawRoundedRect(pr, radius, radius)
+        # Threshold line
+        tx = r.left() + int(r.width() * (self._threshold / 100.0))
+        pen = QPen(QColor(255, 255, 255, 160))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawLine(tx, r.top() + 1, tx, r.bottom() - 1)
+        p.end()
 
 class _Bridge(QObject):
     """Signal bridge for cross-thread CLI callbacks."""
@@ -250,6 +302,22 @@ class MainWindow(QMainWindow):
             tb.addWidget(_spacer)
         except Exception:
             pass
+        # [Removed] Top-bar Context Usage label; now shown inline under the input bar
+        # Token usage warning label (updates dynamically)
+        self._token_label = QLabel('')
+        try:
+            self._token_label.setObjectName('TokenWarnLabel')
+            self._token_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+            self._token_label.setVisible(False)
+            self._token_label.setToolTip('Shows when chat context is nearing the configured token limit')
+        except Exception:
+            pass
+        try:
+            _sp_tok_l = QWidget(); _sp_tok_l.setFixedWidth(10)
+            tb.addWidget(_sp_tok_l)
+        except Exception:
+            pass
+        tb.addWidget(self._token_label)
         # Settings button in top-right corner
         settings_btn = QToolButton(); settings_btn.setObjectName('SettingsTool')
         settings_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -392,10 +460,30 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         mv.addWidget(input_bar)
+        # Context usage inline row (label + progress bar) under typing area
+        self._ctx_row = QWidget(); self._ctx_row.setObjectName('ContextRow')
+        _ctx_h = QHBoxLayout(self._ctx_row); _ctx_h.setContentsMargins(0, 0, 0, 0); _ctx_h.setSpacing(8)
+        self._ctx_text = QLabel('Context usage:'); self._ctx_text.setObjectName('ContextInlineLabel')
+        try:
+            self._ctx_text.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        except Exception:
+            pass
+        self._ctx_bar = _ContextProgressBar()
+        try:
+            _ctx_h.addWidget(self._ctx_text, 0)
+            _ctx_h.addWidget(self._ctx_bar, 1)
+        except Exception:
+            pass
+        self._ctx_row.setVisible(False)
+        mv.addWidget(self._ctx_row)
         h.addWidget(main, 1)
         # Populate model selector on startup
         try:
             self._refresh_models()
+        except Exception:
+            pass
+        try:
+            self._update_token_warning()
         except Exception:
             pass
         # Kick immediate startup GPU probe only if GPU backend present but model missing
@@ -407,6 +495,17 @@ class MainWindow(QMainWindow):
             pass
         # Data
         self._load_chats()
+        # Defer context UI update until after chats have loaded and layout has settled
+        def _defer_ctx_update() -> None:
+            try:
+                self._update_token_warning()
+            except Exception:
+                pass
+        try:
+            QTimer.singleShot(0, _defer_ctx_update)
+            QTimer.singleShot(50, _defer_ctx_update)
+        except Exception:
+            pass
         # Ensure an initial baseline label (CPU) is shown before any detection results
         try:
             self._update_device_label()
@@ -578,7 +677,12 @@ class MainWindow(QMainWindow):
             role = m.get('role','assistant')
             txt = m.get('content','')
             iso = m.get('ts')
-            self.chat.add_message(role, txt, iso, animate=False)
+            tok = None
+            try:
+                tok = int(estimate_tokens(txt))
+            except Exception:
+                tok = None
+            self.chat.add_message(role, txt, iso, animate=False, token_count=tok)
         # Show or hide typing indicator based on per-chat waiting state
         try:
             if int(self._waiting_by_chat.get(cid, 0)) > 0:
@@ -597,6 +701,17 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, _scroll_on_open)
             QTimer.singleShot(16, _scroll_on_open)
             QTimer.singleShot(100, _scroll_on_open)
+        except Exception:
+            pass
+        # Defer context usage UI update to ensure it's based on the fully loaded chat
+        def _defer_ctx_sel() -> None:
+            try:
+                self._update_token_warning()
+            except Exception:
+                pass
+        try:
+            QTimer.singleShot(0, _defer_ctx_sel)
+            QTimer.singleShot(50, _defer_ctx_sel)
         except Exception:
             pass
     def _new_chat(self) -> None:
@@ -1955,13 +2070,22 @@ class MainWindow(QMainWindow):
             return
         self.entry.clear()
         now_iso = datetime.now().isoformat()
-        self.chat.add_message('user', txt, now_iso, animate=False)
+        tok_user = None
+        try:
+            tok_user = int(estimate_tokens(txt))
+        except Exception:
+            tok_user = None
+        self.chat.add_message('user', txt, now_iso, animate=False, token_count=tok_user)
         try:
             self.chat.force_scroll_bottom_deferred()
         except Exception:
             pass
         self._messages.append({'role':'user','content':txt,'ts':now_iso})
         storage.save_messages(origin_cid, self._messages)
+        try:
+            self._update_token_warning()
+        except Exception:
+            pass
         self._ensure_chat_started()
         # Debounce typing indicator (show if assistant not yet responded after 300ms)
         self._assistant_waiting = True
@@ -2064,6 +2188,93 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         dlg.exec()
+        try:
+            self._update_token_warning()
+        except Exception:
+            pass
+    
+    def _update_token_warning(self) -> None:
+        """Update the inline context usage row (label + progress) and optional toolbar warning label."""
+        lbl = getattr(self, '_token_label', None)
+        row = getattr(self, '_ctx_row', None)
+        text_lbl = getattr(self, '_ctx_text', None)
+        bar = getattr(self, '_ctx_bar', None)
+        if not bar or not row or not text_lbl:
+            return
+        debug = False
+        try:
+            debug = bool(storage.get_bool('debug_context_ui', False))
+        except Exception:
+            debug = False
+        try:
+            enabled = bool(storage.get_bool('context_warn_enabled', False))
+        except Exception:
+            enabled = False
+        try:
+            max_tokens = int(storage.get_int('context_max_tokens', 4096))
+        except Exception:
+            max_tokens = 0
+        try:
+            threshold_pct = int(storage.get_int('context_warn_threshold_pct', 80))
+        except Exception:
+            threshold_pct = 80
+        if not enabled or max_tokens <= 0:
+            try:
+                lbl.setVisible(False)
+            except Exception:
+                pass
+            try:
+                row.setVisible(False)
+                bar.setVisible(False)
+            except Exception:
+                pass
+            if debug:
+                try:
+                    print(f"[ctx] disabled or invalid settings: enabled={enabled} max={max_tokens}")
+                except Exception:
+                    pass
+            return
+        msgs = list(getattr(self, '_messages', []))
+        try:
+            used = int(estimate_messages_tokens(msgs))
+        except Exception:
+            used = 0
+        try:
+            pct = int((used / float(max_tokens)) * 100) if max_tokens > 0 else 0
+        except Exception:
+            pct = 0
+        show = pct >= int(threshold_pct)
+        if debug:
+            try:
+                print(f"[ctx] used={used} max={max_tokens} pct={pct} thr={threshold_pct} show_lbl={show} msgs={len(msgs)}")
+            except Exception:
+                pass
+        if show:
+            try:
+                lbl.setText(f"Context {pct}% of {max_tokens}")
+                lbl.setStyleSheet("QLabel#TokenWarnLabel { color: rgba(255,255,255,0.6); font-size: 12px; }")
+                lbl.setVisible(True)
+            except Exception:
+                pass
+        else:
+            try:
+                lbl.setVisible(False)
+            except Exception:
+                pass
+        try:
+            # Update inline row
+            text_lbl.setText(f"Context usage ({used:,}/{max_tokens:,} tokens):")
+            bar.set_threshold(int(threshold_pct))
+            bar.set_value(max(0, min(100, int(pct))))
+            bar.setVisible(True)
+            row.setVisible(True)
+            if debug:
+                try:
+                    print(f"[ctx] row updated: used={used} max={max_tokens} value={max(0, min(100, int(pct)))} thr={int(threshold_pct)}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     def _on_assistant(self, text: str) -> None:
         """Animate assistant reply with typing effect and save on completion."""
@@ -2099,7 +2310,7 @@ class MainWindow(QMainWindow):
                 sticky = bool(self.chat.is_at_bottom())
             except Exception:
                 sticky = False
-            bubble = self.chat.add_message('assistant', '', now_iso, animate=False)
+            bubble = self.chat.add_message('assistant', '', now_iso, animate=False, token_count=None)
             # Ensure the new assistant bubble is brought into view immediately
             try:
                 self.chat.force_scroll_bottom_deferred()
@@ -2147,11 +2358,21 @@ class MainWindow(QMainWindow):
                         QTimer.singleShot(100, _scroll_after_ai_done)
                     except Exception:
                         pass
+                    try:
+                        self._update_token_warning()
+                    except Exception:
+                        pass
                     self._typing = None
                     return
                 nxt = min(len(s), idx + step)
                 try:
                     state['bubble'].append_text(s[idx:nxt])
+                except Exception:
+                    pass
+                try:
+                    cur = state['bubble'].text()
+                    tok = int(estimate_tokens(cur))
+                    state['bubble'].set_token_count(tok)
                 except Exception:
                     pass
                 state['index'] = nxt

@@ -1,7 +1,7 @@
 from typing import Dict, List
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics
-from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QTabWidget, QWidget, QScrollArea, QFormLayout, QHBoxLayout, QPushButton, QLineEdit, QColorDialog, QLabel, QMessageBox, QFrame, QSizePolicy, QCheckBox
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QTabWidget, QWidget, QScrollArea, QFormLayout, QHBoxLayout, QPushButton, QLineEdit, QColorDialog, QLabel, QMessageBox, QFrame, QSizePolicy, QCheckBox, QSpinBox
 from . import styles
 from core import storage
 
@@ -70,9 +70,25 @@ class SettingsDialog(QDialog):
             self._chat_show_ts = bool(storage.get_bool('chat_show_timestamp', True))
         except Exception:
             self._chat_show_ts = True
+        # Context warning settings
+        try:
+            self._ctx_warn_enabled = bool(storage.get_app_settings().get('context_warn_enabled', True))
+        except Exception:
+            self._ctx_warn_enabled = True
+        try:
+            self._ctx_max_tokens = int(storage.get_app_settings().get('context_max_tokens', 4096))
+        except Exception:
+            self._ctx_max_tokens = 4096
+        try:
+            self._ctx_threshold_pct = int(storage.get_app_settings().get('context_warn_threshold_pct', 85))
+        except Exception:
+            self._ctx_threshold_pct = 85
         self._saved_chat_settings = {
             'chat_show_role': bool(self._chat_show_role),
             'chat_show_timestamp': bool(self._chat_show_ts),
+            'context_warn_enabled': bool(self._ctx_warn_enabled),
+            'context_max_tokens': int(self._ctx_max_tokens),
+            'context_warn_threshold_pct': int(self._ctx_threshold_pct),
         }
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12,12,12,12)
@@ -241,6 +257,34 @@ class SettingsDialog(QDialog):
             pass
         self._cb_ts.toggled.connect(self._on_chat_ts_toggled)
         form.addRow(self._cb_ts)
+        # Context warning controls
+        self._cb_ctx_warn = QCheckBox('Enable context limit warning')
+        try:
+            self._cb_ctx_warn.setChecked(bool(self._ctx_warn_enabled))
+        except Exception:
+            pass
+        self._cb_ctx_warn.toggled.connect(self._on_ctx_warn_toggled)
+        form.addRow(self._cb_ctx_warn)
+        self._sb_ctx_max = QSpinBox()
+        try:
+            self._sb_ctx_max.setRange(512, 200000)
+            self._sb_ctx_max.setSingleStep(256)
+            self._sb_ctx_max.setValue(int(self._ctx_max_tokens))
+            self._sb_ctx_max.setSuffix(' tokens')
+        except Exception:
+            pass
+        self._sb_ctx_max.valueChanged.connect(self._on_ctx_max_changed)
+        form.addRow(QLabel('Max context tokens'), self._sb_ctx_max)
+        self._sb_ctx_threshold = QSpinBox()
+        try:
+            self._sb_ctx_threshold.setRange(50, 99)
+            self._sb_ctx_threshold.setSingleStep(1)
+            self._sb_ctx_threshold.setValue(int(self._ctx_threshold_pct))
+            self._sb_ctx_threshold.setSuffix('%')
+        except Exception:
+            pass
+        self._sb_ctx_threshold.valueChanged.connect(self._on_ctx_thresh_changed)
+        form.addRow(QLabel('Warning threshold'), self._sb_ctx_threshold)
         v.addLayout(form)
         v.addStretch(1)
         self._tabs.addTab(page, 'Chat')
@@ -261,6 +305,21 @@ class SettingsDialog(QDialog):
             self.chatShowTimestampChanged.emit(bool(v))
         except Exception:
             pass
+        self._refresh_button_states()
+    def _on_ctx_warn_toggled(self, v: bool) -> None:
+        self._ctx_warn_enabled = bool(v)
+        self._refresh_button_states()
+    def _on_ctx_max_changed(self, val: int) -> None:
+        try:
+            self._ctx_max_tokens = int(val)
+        except Exception:
+            self._ctx_max_tokens = 4096
+        self._refresh_button_states()
+    def _on_ctx_thresh_changed(self, val: int) -> None:
+        try:
+            self._ctx_threshold_pct = int(val)
+        except Exception:
+            self._ctx_threshold_pct = 85
         self._refresh_button_states()
     def _apply_preview(self) -> None:
         """Apply a live preview stylesheet without mutating the global theme."""
@@ -301,11 +360,19 @@ class SettingsDialog(QDialog):
         try:
             storage.set_bool('chat_show_role', bool(self._chat_show_role))
             storage.set_bool('chat_show_timestamp', bool(self._chat_show_ts))
+            cur = storage.get_app_settings()
+            cur['context_warn_enabled'] = bool(self._ctx_warn_enabled)
+            cur['context_max_tokens'] = int(self._ctx_max_tokens)
+            cur['context_warn_threshold_pct'] = int(self._ctx_threshold_pct)
+            storage.set_app_settings(cur)
         except Exception:
             pass
         self._saved_chat_settings = {
             'chat_show_role': bool(self._chat_show_role),
             'chat_show_timestamp': bool(self._chat_show_ts),
+            'context_warn_enabled': bool(self._ctx_warn_enabled),
+            'context_max_tokens': int(self._ctx_max_tokens),
+            'context_warn_threshold_pct': int(self._ctx_threshold_pct),
         }
         # Ensure applied baseline matches saved (spec: Save applies changes too)
         self._apply_live()
@@ -320,6 +387,9 @@ class SettingsDialog(QDialog):
         try:
             self._cb_role.setChecked(True)
             self._cb_ts.setChecked(True)
+            self._cb_ctx_warn.setChecked(True)
+            self._sb_ctx_max.setValue(4096)
+            self._sb_ctx_threshold.setValue(85)
         except Exception:
             pass
         self._refresh_button_states()
@@ -333,8 +403,20 @@ class SettingsDialog(QDialog):
         except Exception:
             theme_changed_vs_saved = self._theme != self._saved_theme
             theme_differs_default_saved = self._saved_theme != self._default_theme
-        chat_changed_vs_saved = bool(self._chat_show_role != self._saved_chat_settings.get('chat_show_role') or self._chat_show_ts != self._saved_chat_settings.get('chat_show_timestamp'))
-        chat_differs_default = bool(self._saved_chat_settings.get('chat_show_role') != True or self._saved_chat_settings.get('chat_show_timestamp') != True)
+        chat_changed_vs_saved = bool(
+            self._chat_show_role != self._saved_chat_settings.get('chat_show_role') or
+            self._chat_show_ts != self._saved_chat_settings.get('chat_show_timestamp') or
+            self._ctx_warn_enabled != self._saved_chat_settings.get('context_warn_enabled') or
+            int(self._ctx_max_tokens) != int(self._saved_chat_settings.get('context_max_tokens')) or
+            int(self._ctx_threshold_pct) != int(self._saved_chat_settings.get('context_warn_threshold_pct'))
+        )
+        chat_differs_default = bool(
+            self._saved_chat_settings.get('chat_show_role') != True or
+            self._saved_chat_settings.get('chat_show_timestamp') != True or
+            self._saved_chat_settings.get('context_warn_enabled') != True or
+            int(self._saved_chat_settings.get('context_max_tokens')) != 4096 or
+            int(self._saved_chat_settings.get('context_warn_threshold_pct')) != 85
+        )
         changed_vs_saved = bool(theme_changed_vs_saved or chat_changed_vs_saved)
         differs_default_saved = bool(theme_differs_default_saved or chat_differs_default)
         self._save_btn.setProperty('changed', bool(changed_vs_saved))
@@ -396,6 +478,9 @@ class SettingsDialog(QDialog):
             try:
                 self._cb_role.setChecked(bool(self._saved_chat_settings.get('chat_show_role', True)))
                 self._cb_ts.setChecked(bool(self._saved_chat_settings.get('chat_show_timestamp', True)))
+                self._cb_ctx_warn.setChecked(bool(self._saved_chat_settings.get('context_warn_enabled', True)))
+                self._sb_ctx_max.setValue(int(self._saved_chat_settings.get('context_max_tokens', 4096)))
+                self._sb_ctx_threshold.setValue(int(self._saved_chat_settings.get('context_warn_threshold_pct', 85)))
             except Exception:
                 pass
             event.accept()

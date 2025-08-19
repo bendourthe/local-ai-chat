@@ -505,6 +505,8 @@ QToolButton#SettingsTool { background: transparent; padding: 0px; border-radius:
 QToolButton#SettingsTool:hover { background: rgba(255,255,255,0.08); }
 /* Top bar 'MODEL SELECTOR' label */
 QLabel#ModelSelectorLabel { color: %(TEXT_PRIMARY)s; font-weight: 800; font-size: 20px; padding: 0px 2px; text-align: right; }
+/* Top bar 'CONTEXT USAGE' label */
+QLabel#ContextLabel { color: %(TEXT_PRIMARY)s; font-weight: 800; font-size: 20px; padding: 0px 2px; text-align: right; }
 /* Settings dialog button states */
 QPushButton#TSave[changed="true"] { background-color: %(SEND_BG)s; }
 QPushButton#TRestore[needsReset="true"] { background-color: %(DELETE_BUTTON_BG)s; }
@@ -541,8 +543,12 @@ QFrame#Bubble[sender="user"] { background: %(BUBBLE_USER)s; }
 QFrame#Bubble[sender="ai"] { background: %(BUBBLE_AI)s; }
 QFrame#Bubble QLabel#Msg { background: transparent; }
 QFrame#Bubble QLabel#Ts { color: %(TEXT_MUTED)s; background: transparent; }
+QFrame#Bubble QLabel#Tok { color: %(TEXT_MUTED)s; background: transparent; font-style: italic; }
 QFrame#Bubble[sender="user"] QLabel#Msg { color: %(USER_TEXT)s; }
 QFrame#Bubble[sender="ai"] QLabel#Msg { color: %(TEXT_PRIMARY)s; }
+/* Inline context usage row under input */
+QWidget#ContextRow { background: transparent; }
+QLabel#ContextInlineLabel { color: %(TEXT_MUTED)s; background: transparent; font-size: 12px; font-weight: 600; }
 /* Sidebar title */
 QLabel#SideTitle { color: %(TEXT_PRIMARY)s; font-size: 16px; font-weight: 700; padding: 0px 2px 6px 2px; }
 /* Chat board container */

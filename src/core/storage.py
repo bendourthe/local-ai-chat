@@ -309,6 +309,9 @@ def _default_settings() -> Dict:
     return {
         'chat_show_timestamp': True,
         'chat_show_role': True,
+        'context_warn_enabled': True,
+        'context_max_tokens': 4096,
+        'context_warn_threshold_pct': 85,
     }
 
 def _read_settings() -> Dict:
@@ -359,4 +362,38 @@ def set_bool(key: str, value: bool) -> None:
     """Persist a boolean setting."""
     cur = _read_settings()
     cur[key] = bool(value)
+    _write_settings(cur)
+
+def get_int(key: str, default: Optional[int] = None) -> int:
+    """
+    Return an integer setting with fallback to provided default or built-in defaults.
+
+    Parameters:
+        - key (str): Setting key name
+        - default (Optional[int]): Optional fallback if key is missing or invalid
+
+    Returns:
+        - int: Retrieved setting as integer
+
+    Raises:
+        - None: Safely falls back to default on any error
+
+    Authors:
+        - Benjamin Dourthe (benjamin@adonamed.com)
+    """
+    if default is None:
+        default = int(_default_settings().get(key, 0))
+    try:
+        v = _read_settings().get(key)
+        return int(v) if v is not None else int(default)
+    except Exception:
+        return int(default)
+
+def set_int(key: str, value: int) -> None:
+    """Persist an integer setting."""
+    cur = _read_settings()
+    try:
+        cur[key] = int(value)
+    except Exception:
+        cur[key] = int(_default_settings().get(key, 0))
     _write_settings(cur)

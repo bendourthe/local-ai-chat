@@ -7,12 +7,13 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
 from .styles import FONT_CHAT, FONT_TS, FONT_SENDER
 
 class Bubble(QFrame):
-    """Rounded message bubble with optional alignment and timestamp."""
-    def __init__(self, text: str, is_user: bool, timestamp: str) -> None:
+    """Rounded message bubble with optional alignment, timestamp, and token count."""
+    def __init__(self, text: str, is_user: bool, timestamp: str, token_count: int | None = None) -> None:
         super().__init__()
         self._text = text
         self._is_user = is_user
         self._timestamp = timestamp
+        self._token_count: int | None = token_count
         # Prefer natural content width; don't stretch across the row
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.setObjectName('Bubble')
@@ -35,7 +36,7 @@ class Bubble(QFrame):
         sender.setStyleSheet('font-size:16px;')
         sender.setObjectName('Sender')
         self._sender_label = sender
-        # Header row with sender label and timestamp
+        # Header row with sender label, timestamp, and token count
         header = QHBoxLayout()
         header.setContentsMargins(0,0,0,0)
         header.setSpacing(8)
@@ -51,6 +52,16 @@ class Bubble(QFrame):
         header.addWidget(ts, 0)
         header.addStretch(1)
         self._ts_label = ts
+        # Token count label (hidden if None)
+        tok = QLabel('')
+        tok.setFont(FONT_TS)
+        tok.setObjectName('Tok')
+        try:
+            tok.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        except Exception:
+            pass
+        self._tok_label = tok
+        header.addWidget(tok, 0)
         msg = QLabel(text)
         msg.setWordWrap(True)
         msg.setFont(FONT_CHAT)
@@ -75,6 +86,11 @@ class Bubble(QFrame):
         # Visibility flags (default True)
         self._show_role = True
         self._show_ts = True
+        # Initialize token label visibility/content
+        try:
+            self.set_token_count(self._token_count)
+        except Exception:
+            pass
     def _natural_content_width(self, max_w_hint: int | None = None) -> int:
         """Return min(max(headerWidth, contentWidth), maxWidthHint) without extra heuristics."""
         try:
@@ -82,9 +98,18 @@ class Bubble(QFrame):
             spc = 8
             fm_sender = QFontMetrics(self._sender_label.font())
             fm_ts = QFontMetrics(self._ts_label.font())
+            fm_tok = QFontMetrics(self._tok_label.font())
             w_sender = fm_sender.horizontalAdvance(self._sender_label.text()) if self._sender_label.isVisible() else 0
             w_ts = fm_ts.horizontalAdvance(self._ts_label.text()) if self._ts_label.isVisible() else 0
-            w_header = w_sender + (spc if (w_sender and w_ts) else 0) + w_ts + pad
+            w_tok = fm_tok.horizontalAdvance(self._tok_label.text()) if self._tok_label.isVisible() else 0
+            w_header = 0
+            if w_sender:
+                w_header += w_sender
+            if w_ts:
+                w_header += (spc if w_header and w_ts else 0) + w_ts
+            if w_tok:
+                w_header += (spc if w_header and w_tok else 0) + w_tok
+            w_header += pad
             # Measure content width via QTextDocument ideal width to account for emoji/markdown
             w_msg = 0
             try:
@@ -232,6 +257,28 @@ class Bubble(QFrame):
             self.apply_width(mn, mx)
         except Exception:
             pass
+    def set_token_count(self, n: int | None) -> None:
+        """Show or hide token count label with thousands separators."""
+        try:
+            self._token_count = int(n) if n is not None else None
+        except Exception:
+            self._token_count = None
+        txt = ''
+        if isinstance(self._token_count, int) and self._token_count >= 0:
+            try:
+                txt = f"({self._token_count:,} tokens)"
+            except Exception:
+                txt = f"({self._token_count} tokens)"
+        try:
+            self._tok_label.setText(txt)
+            self._tok_label.setVisible(bool(txt))
+        except Exception:
+            pass
+        try:
+            mn, mx = self._last_bounds
+            self.apply_width(mn, mx)
+        except Exception:
+            pass
 
     def set_markdown(self, enabled: bool) -> None:
         """Enable or disable Markdown rendering for the message label."""
@@ -282,7 +329,7 @@ class ChatView(QScrollArea):
     def _fmt_time(self, dt: datetime) -> str:
         """Format time like '01:50:45 AM'."""
         return dt.strftime('%I:%M:%S %p')
-    def add_message(self, role: str, text: str, iso_ts: str, animate: bool = True):
+    def add_message(self, role: str, text: str, iso_ts: str, animate: bool = True, token_count: int | None = None):
         # Determine sender side
         is_user = role.lower().startswith('user') or role == 'YOU' or role == 'user'
         # Parse ISO timestamp and manage date separators
@@ -301,8 +348,8 @@ class ChatView(QScrollArea):
             except Exception:
                 pass
             self._v.insertWidget(self._v.count()-1, sep)
-        # Build bubble with time-only in header
-        bubble = Bubble(text, is_user, self._fmt_time(dt))
+        # Build bubble with time-only in header and optional token count
+        bubble = Bubble(text, is_user, self._fmt_time(dt), token_count)
         try:
             bubble.set_show_role(bool(self._show_role))
             bubble.set_show_timestamp(bool(self._show_ts))
