@@ -52,6 +52,7 @@ class SettingsDialog(QDialog):
     themeChanged = Signal(dict)
     chatShowRoleChanged = Signal(bool)
     chatShowTimestampChanged = Signal(bool)
+    chatSettingsSaved = Signal(dict)
     def __init__(self, parent: QWidget = None, initial_theme: Dict[str, str] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle('Settings')
@@ -287,7 +288,7 @@ class SettingsDialog(QDialog):
         form.addRow(QLabel('Warning threshold'), self._sb_ctx_threshold)
         v.addLayout(form)
         v.addStretch(1)
-        self._tabs.addTab(page, 'Chat')
+        self._chat_tab_idx = self._tabs.addTab(page, 'Chat')
     def _on_row_changed(self, key: str, value: str) -> None:
         self._theme[key] = value
         self._apply_preview()
@@ -356,7 +357,12 @@ class SettingsDialog(QDialog):
             minimal = dict(self._theme)
         styles.save_theme(minimal)
         self._saved_theme = dict(minimal)
-        # Persist chat settings
+        # Persist chat settings and emit saved signal
+        self._save_chat_settings()
+        # Ensure applied baseline matches saved (spec: Save applies changes too)
+        self._apply_live()
+    def _save_chat_settings(self) -> None:
+        """Persist chat settings only and emit a signal for immediate UI updates."""
         try:
             storage.set_bool('chat_show_role', bool(self._chat_show_role))
             storage.set_bool('chat_show_timestamp', bool(self._chat_show_ts))
@@ -374,24 +380,47 @@ class SettingsDialog(QDialog):
             'context_max_tokens': int(self._ctx_max_tokens),
             'context_warn_threshold_pct': int(self._ctx_threshold_pct),
         }
-        # Ensure applied baseline matches saved (spec: Save applies changes too)
-        self._apply_live()
+        try:
+            self.chatSettingsSaved.emit(dict(self._saved_chat_settings))
+        except Exception:
+            pass
+        self._refresh_button_states()
     def _restore_defaults(self) -> None:
+        # If Chat tab is active: confirm, then restore chat defaults and auto-save
+        try:
+            on_chat_tab = int(self._tabs.currentIndex()) == int(getattr(self, '_chat_tab_idx', -1))
+        except Exception:
+            on_chat_tab = False
+        if on_chat_tab:
+            try:
+                resp = QMessageBox.question(self, 'Restore Chat Defaults', 'This will restore all Chat settings to their defaults and save them immediately. Continue?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            except Exception:
+                resp = QMessageBox.No
+            if resp != QMessageBox.Yes:
+                return
+            try:
+                self._cb_role.setChecked(True)
+                self._cb_ts.setChecked(True)
+                self._cb_ctx_warn.setChecked(True)
+                self._sb_ctx_max.setValue(4096)
+                self._sb_ctx_threshold.setValue(85)
+            except Exception:
+                pass
+            # Ensure internal fields mirror widgets
+            self._chat_show_role = True
+            self._chat_show_ts = True
+            self._ctx_warn_enabled = True
+            self._ctx_max_tokens = 4096
+            self._ctx_threshold_pct = 85
+            self._save_chat_settings()
+            return
+        # Otherwise: Theme tab behavior (restore preview only)
         defaults = dict(self._default_theme)
         self._theme.update(defaults)
         for row in self._rows:
             if row._key in self._theme:
                 row._edit.setText(self._theme[row._key])
         self._apply_preview()
-        # Reset chat toggles to defaults (True)
-        try:
-            self._cb_role.setChecked(True)
-            self._cb_ts.setChecked(True)
-            self._cb_ctx_warn.setChecked(True)
-            self._sb_ctx_max.setValue(4096)
-            self._sb_ctx_threshold.setValue(85)
-        except Exception:
-            pass
         self._refresh_button_states()
 
     def _refresh_button_states(self) -> None:
@@ -439,7 +468,13 @@ class SettingsDialog(QDialog):
             theme_changed_vs_saved = any(self._theme.get(k) != self._saved_theme.get(k) for k in keys)
         except Exception:
             theme_changed_vs_saved = self._theme != self._saved_theme
-        chat_changed_vs_saved = bool(self._chat_show_role != self._saved_chat_settings.get('chat_show_role') or self._chat_show_ts != self._saved_chat_settings.get('chat_show_timestamp'))
+        chat_changed_vs_saved = bool(
+            self._chat_show_role != self._saved_chat_settings.get('chat_show_role') or
+            self._chat_show_ts != self._saved_chat_settings.get('chat_show_timestamp') or
+            self._ctx_warn_enabled != self._saved_chat_settings.get('context_warn_enabled') or
+            int(self._ctx_max_tokens) != int(self._saved_chat_settings.get('context_max_tokens')) or
+            int(self._ctx_threshold_pct) != int(self._saved_chat_settings.get('context_warn_threshold_pct'))
+        )
         changed_vs_saved = bool(theme_changed_vs_saved or chat_changed_vs_saved)
         if not changed_vs_saved:
             event.accept()

@@ -2156,32 +2156,19 @@ class MainWindow(QMainWindow):
         if app:
             app.setStyleSheet(qss)
     
-    def _on_chat_show_role_changed(self, v: bool) -> None:
-        try:
-            self.chat.set_show_role(bool(v))
-        except Exception:
-            pass
-        try:
-            storage.set_bool('chat_show_role', bool(v))
-        except Exception:
-            pass
-    
-    def _on_chat_show_timestamp_changed(self, v: bool) -> None:
-        try:
-            self.chat.set_show_timestamp(bool(v))
-        except Exception:
-            pass
-        try:
-            storage.set_bool('chat_show_timestamp', bool(v))
-        except Exception:
-            pass
-    
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self, initial_theme=styles.get_theme())
         dlg.themeChanged.connect(self._apply_theme)
         try:
             dlg.chatShowRoleChanged.connect(self._on_chat_show_role_changed)
+        except Exception:
+            pass
+        try:
             dlg.chatShowTimestampChanged.connect(self._on_chat_show_timestamp_changed)
+        except Exception:
+            pass
+        try:
+            dlg.chatSettingsSaved.connect(self._on_chat_settings_saved)
         except Exception:
             pass
         dlg.exec()
@@ -2189,14 +2176,45 @@ class MainWindow(QMainWindow):
             self._update_token_warning()
         except Exception:
             pass
-    
+
+    def _on_chat_show_role_changed(self, v: bool) -> None:
+        try:
+            self.chat.set_show_role(bool(v))
+        except Exception:
+            pass
+
+    def _on_chat_show_timestamp_changed(self, v: bool) -> None:
+        try:
+            self.chat.set_show_timestamp(bool(v))
+        except Exception:
+            pass
+
+    def _on_chat_settings_saved(self, s: dict) -> None:
+        try:
+            if isinstance(s, dict):
+                try:
+                    if 'chat_show_role' in s:
+                        self.chat.set_show_role(bool(s.get('chat_show_role')))
+                except Exception:
+                    pass
+                try:
+                    if 'chat_show_timestamp' in s:
+                        self.chat.set_show_timestamp(bool(s.get('chat_show_timestamp')))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._update_token_warning()
+        except Exception:
+            pass
+
     def _update_token_warning(self) -> None:
-        """Update the inline context usage row (label + progress) and optional toolbar warning label."""
         lbl = getattr(self, '_token_label', None)
         row = getattr(self, '_ctx_row', None)
         text_lbl = getattr(self, '_ctx_text', None)
         bar = getattr(self, '_ctx_bar', None)
-        if not bar or not row or not text_lbl:
+        if not lbl or not row or not text_lbl or not bar:
             return
         debug = False
         try:
@@ -2259,7 +2277,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         try:
-            # Update inline row
             text_lbl.setText(f"Context usage ({used:,}/{max_tokens:,} tokens):")
             bar.set_threshold(int(threshold_pct))
             bar.set_value(max(0, min(100, int(pct))))
