@@ -67,7 +67,7 @@ local-ai-chat/
     main.py
     gui/
       app.py
-      settings_dialog.py
+      settings.py
       styles.py
     core/
       foundry_cli.py

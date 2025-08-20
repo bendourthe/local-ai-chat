@@ -11,7 +11,7 @@ from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QPen, QBrush
 from PySide6 import QtSvg
 from .styles import QSS, APP_BG, PANEL_BG, SIDEBAR_BG, ACCENT, TEXT, INPUT_BAR_BG, CHAT_AREA_BG
 from . import styles
-from .settings_dialog import SettingsDialog
+from .settings import SettingsDialog
 from .chat_widgets import ChatView
 from core.foundry_cli import FoundryCLI
 from core import storage
@@ -1580,9 +1580,6 @@ class MainWindow(QMainWindow):
                     tips.append(f"Backend: {backend}")
                 if model:
                     tips.append(f"Model: {model}")
-                if self._gpu_debug:
-                    tips.append("Samples:")
-                    tips.extend(list(self._gpu_debug))
                 if not tips:
                     tips.append('GPU acceleration is active.')
             else:

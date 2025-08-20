@@ -15,7 +15,7 @@
 - The app is a desktop GUI built with PySide6. Entry point: `src/main.py` starting `gui.app.MainWindow`.
 - CLI integration encapsulated in `src/core/foundry_cli.py`; storage operations in `src/core/storage.py`.
 - Theming centralizes QSS generation in `src/gui/styles.py` with a minimal schema persisted to `src/gui/theme.json`.
-- Settings dialog (`src/gui/settings_dialog.py`) builds a Theme tab from theme keys grouped by sections, enabling live preview and save/restore.
+- Settings dialog (`src/gui/settings.py`) builds a Theme tab from theme keys grouped by sections, enabling live preview and save/restore.
 
 ## UI modernization (Settings dialog)
 - Tabs: Enabled document mode and added QSS to remove outlines and enlarge fonts, blending tabs with content.

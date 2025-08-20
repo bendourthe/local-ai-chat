@@ -99,8 +99,8 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
         outer.addWidget(self._tabs, 1)
-        self._build_theme_tab()
         self._build_chat_tab()
+        self._build_theme_tab()
         btns = QHBoxLayout()
         btns.setContentsMargins(0,0,0,0)
         btns.setSpacing(6)
@@ -277,7 +277,7 @@ class SettingsDialog(QDialog):
         form.addRow(QLabel('Max context tokens'), self._sb_ctx_max)
         self._sb_ctx_threshold = QSpinBox()
         try:
-            self._sb_ctx_threshold.setRange(50, 99)
+            self._sb_ctx_threshold.setRange(1, 99)
             self._sb_ctx_threshold.setSingleStep(1)
             self._sb_ctx_threshold.setValue(int(self._ctx_threshold_pct))
             self._sb_ctx_threshold.setSuffix('%')
