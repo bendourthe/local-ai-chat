@@ -1,10 +1,21 @@
 # Task List
 
+## Completed in v0.2.0
 - [x] Fix model selector dropdown population on startup
-- [x] Modernize Settings dialog (tabs, scrollbar, color pickers alignment)
+- [x] Modernize Settings dialog (tabs, scrollbar, color pickers alignment) 
 - [x] Prevent label cropping in Settings color rows
 - [x] Update documentation (README) with version and what's new
 - [x] Add project metadata (CHANGELOG.md, pyproject.toml)
+- [x] Implement typing indicator functionality
+- [x] Add model management features with progress dialogs
+- [x] Enhance chat storage with home directory structure
+- [x] Add device backend detection (GPU via nvidia-smi)
+- [x] Implement context management and token tracking
+- [x] Add chat settings management (role/timestamp visibility)
+- [x] Refactor settings dialog structure
+- [x] Integrate real-time token tracking system
+
+## Future Tasks
 - [ ] Add unit tests for theme save/restore and CLI parsing
 - [ ] Add CI to lint and verify packaging metadata
 - [ ] Optional: Provide binary artifacts via build.ps1 improvements
@@ -14,8 +25,10 @@
 ## Application architecture and design decisions
 - The app is a desktop GUI built with PySide6. Entry point: `src/main.py` starting `gui.app.MainWindow`.
 - CLI integration encapsulated in `src/core/foundry_cli.py`; storage operations in `src/core/storage.py`.
+- Token management handled by `src/core/tokens.py` with real-time tracking integration.
 - Theming centralizes QSS generation in `src/gui/styles.py` with a minimal schema persisted to `src/gui/theme.json`.
 - Settings dialog (`src/gui/settings.py`) builds a Theme tab from theme keys grouped by sections, enabling live preview and save/restore.
+- Chat storage moved to user home directory with structured naming based on creation date and title.
 
 ## UI modernization (Settings dialog)
 - Tabs: Enabled document mode and added QSS to remove outlines and enlarge fonts, blending tabs with content.
@@ -31,9 +44,44 @@
 - Label wrapping: Chose `QFormLayout.WrapLongRows` plus measured minimum width and constrained editor width to minimize truncation while maintaining alignment.
 - Packaging: Minimal `pyproject.toml` with setuptools for future-ready metadata without restructuring to a fully installable package yet.
 
+## v0.2.0 Major Features Added
+
+### Typing Indicator System
+- Debounced typing indicators with 300ms delay for better UX
+- Chat-specific waiting states and proper cleanup on chat transitions
+- Smooth animations with deferred scrolling logic
+
+### Advanced Model Management
+- Model size hints retrieval before download
+- Progress dialogs with streaming output for model operations
+- Threading for non-blocking UI during downloads/deletions
+- Enhanced model selection UI with download status
+
+### Token Tracking and Context Management
+- Real-time token usage monitoring (input, output, reasoning)
+- Context usage warnings with configurable thresholds
+- Per-message token counts displayed in chat bubbles
+- Progress bar visualization of context usage
+- Integration with TokenTracker class for accurate metrics
+
+### Chat Interface Enhancements
+- Markdown rendering support for rich text formatting
+- Dynamic bubble width calculations
+- GPU detection and backend display
+- Role and timestamp visibility toggles
+- Improved scrolling and message handling
+
+### Storage Improvements
+- Chat files stored in user home directory
+- Structured naming: `YYYY-MM-DD_title.json`
+- Automatic file management and error handling
+- Unique path generation with collision handling
+
 ## Additional context
 - External chat scrollbar previously implemented and styled to match theme.
 - Theme system supports nested or flat JSON with backward-compatible key aliases.
+- Token estimation uses tiktoken-compatible algorithms for accuracy.
+- GPU detection supports CUDA backends via nvidia-smi integration.
 
 # Troubleshooting
 
@@ -47,3 +95,15 @@
 - Observed truncation with long variable names.
 - Implemented: label word-wrap, left alignment, measured minimum width, row wrap policy; constrained hex editor width and right-aligned controls.
 - Verified visual alignment and no cropping at typical window sizes.
+
+## Token tracking integration challenges
+- Synchronization between chat bubble counts and tracker metrics
+- Ensuring accurate token display across chat switches
+- Managing token state during chat creation/deletion
+- Real-time updates without performance impact
+
+## Chat storage migration to home directory
+- Moved from LocalAppData to structured home directory storage
+- Implemented collision-safe naming with date prefixes
+- Added robust error handling for file operations
+- Maintained backward compatibility during transition

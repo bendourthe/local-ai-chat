@@ -1,12 +1,24 @@
 # Foundry Local Desktop Chat (Windows)
 
-Version: 0.1.0
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
+
+Version: 0.2.0
 
 A simple Windows desktop app (PySide6/Qt) to manage Microsoft Foundry Local:
 - Install Foundry Local via winget
 - List available models
 - Select a model and chat with clean, readable streaming
 - Persist chats in a sidebar (load, rename, delete)
+
+## What's New in 0.2.0
+- **Typing Indicators**: Real-time typing animations while waiting for assistant responses with smart debounce logic
+- **Advanced Model Management**: Model size hints, progress dialogs for downloads/deletions, and enhanced UI feedback
+- **Smart Chat Storage**: Home directory storage with structured naming, automatic file management, and robust error handling
+- **Device Backend Detection**: GPU detection via nvidia-smi and PowerShell with backend display in chat interface
+- **Context Management**: Token usage tracking, warnings, progress bars, and per-message token counts for better awareness
+- **Enhanced Settings**: Chat display preferences (role/timestamp visibility) with live updates and persistence
+- **Token Tracking System**: Real-time monitoring of input, output, and reasoning tokens during AI inference
+- **Improved Chat Interface**: Markdown rendering, dynamic bubble widths, and smooth scrolling animations
 
 ## What's new in 0.1.0
 - Modernized Settings dialog: larger borderless tabs, minimal scrollbar, right-aligned color pickers, anti-cropping labels.
@@ -72,6 +84,7 @@ local-ai-chat/
     core/
       foundry_cli.py
       storage.py
+      tokens.py
   (Chat data is stored under LocalAppData, not in this repo)
 ```
 
