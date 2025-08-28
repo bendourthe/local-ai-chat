@@ -13,6 +13,7 @@ import threading
 import queue
 import time
 from typing import Callable, List, Optional, Tuple
+from .token_tracker import get_token_tracker, TokenMetrics
 
 _ASSISTANT_BLOCK_RE = re.compile(r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|return\|>", re.DOTALL)
 
@@ -27,6 +28,10 @@ class FoundryCLI:
         self._buffer = ""
         self._device_backend: Optional[str] = None
         self._device_model: Optional[str] = None
+        self._token_tracker = get_token_tracker()
+        self._current_request_id: Optional[str] = None
+        self._current_chat_id: Optional[str] = None
+        self._current_model: Optional[str] = None
 
     def is_installed(self) -> bool:
         """Return True if the `foundry` command is available."""
@@ -147,6 +152,9 @@ class FoundryCLI:
         self._buffer = ""
         self._device_backend = None
         self._device_model = None
+        self._current_model = model
+        self._current_request_id = None
+        self._current_chat_id = None
         args = ["foundry", "model", "run", model]
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, creationflags=flags)
@@ -211,6 +219,9 @@ class FoundryCLI:
                     break
                 if on_raw_output:
                     on_raw_output(line.rstrip("\n"))
+                # Process line for token tracking if we have an active request
+                if self._current_request_id:
+                    self._token_tracker.process_raw_output(self._current_request_id, line)
                 self._buffer += line
                 for m in _ASSISTANT_BLOCK_RE.finditer(self._buffer):
                     # Switch off fallback: trust structured assistant blocks exclusively
@@ -220,6 +231,12 @@ class FoundryCLI:
                     content = m.group(1)
                     if on_assistant:
                         on_assistant(content)
+                    # Complete token tracking when assistant response is ready
+                    if self._current_request_id and content:
+                        metrics = self._token_tracker.complete_request(
+                            self._current_request_id, content
+                        )
+                        self._current_request_id = None
                 if "<|return|>" in self._buffer:
                     parts = self._buffer.split("<|return|>")
                     self._buffer = parts[-1]
@@ -492,15 +509,23 @@ class FoundryCLI:
         except Exception:
             pass
         return ok
-    def send_prompt(self, prompt: str) -> None:
-        """Send a user prompt to the running chat session."""
+    def send_prompt(self, prompt: str, chat_id: Optional[str] = None) -> Optional[str]:
+        """Send a user prompt to the running chat session and start token tracking."""
         if not self._proc or not self._proc.stdin:
-            return
+            return None
         try:
             self._proc.stdin.write(prompt + "\n")
             self._proc.stdin.flush()
+            # Start token tracking for this request
+            if chat_id:
+                self._current_chat_id = chat_id
+                self._current_request_id = self._token_tracker.start_request(
+                    chat_id, prompt, self._current_model
+                )
+                return self._current_request_id
         except Exception:
             pass
+        return None
     def stop_chat(self) -> None:
         """Stop the chat session and background reader if running."""
         self._stop_event.set()

@@ -12,10 +12,11 @@ from PySide6 import QtSvg
 from .styles import QSS, APP_BG, PANEL_BG, SIDEBAR_BG, ACCENT, TEXT, INPUT_BAR_BG, CHAT_AREA_BG
 from . import styles
 from .settings import SettingsDialog
-from .chat_widgets import ChatView
+from .chat_widgets import ChatView, Bubble
 from core.foundry_cli import FoundryCLI
 from core import storage
 from core.tokens import estimate_messages_tokens, estimate_tokens
+from core.token_tracker import get_token_tracker, TokenMetrics
 
 class _ContextProgressBar(QWidget):
     """Compact horizontal progress bar with a vertical threshold indicator."""
@@ -97,6 +98,9 @@ class MainWindow(QMainWindow):
         self._cli = FoundryCLI()
         self._current_chat: Optional[str] = None
         self._messages: List[Dict] = []
+        self._token_tracker = get_token_tracker()
+        self._pending_request_id: Optional[str] = None
+        self._bubble_token_cache: Dict[str, int] = {}  # Cache for individual message tokens
         self._model: Optional[str] = None
         self._chat_started: bool = False
         self._models_populating: bool = False
@@ -145,6 +149,8 @@ class MainWindow(QMainWindow):
         # Track per-chat pending requests (refcount) and route responses
         self._waiting_by_chat: Dict[str, int] = {}
         self._inflight_queue = deque()  # type: deque[str]
+        # Register token tracker callback for real-time updates
+        self._token_tracker.register_callback(self._on_token_metrics_update)
         # Device backend detection state
         self._device_backend: Optional[str] = init_backend or 'CPU'
         self._device_model: Optional[str] = init_model
@@ -450,6 +456,7 @@ class MainWindow(QMainWindow):
             pass
         # Colors come from QSS; only set dynamic radius/padding at runtime
         self.send_btn.setStyleSheet("QToolButton#SendButton { border: 0px; border-radius: 15px; padding: 6px; }")
+        _apply_small_shadow(self.send_btn)
         in_h.addWidget(self.send_btn, 0)
         try:
             in_h.setAlignment(self.send_btn, Qt.AlignVCenter)
@@ -495,6 +502,8 @@ class MainWindow(QMainWindow):
             pass
         # Data
         self._load_chats()
+        # Initialize token tracking callbacks
+        self._setup_token_tracking()
         # Defer context UI update until after chats have loaded and layout has settled
         def _defer_ctx_update() -> None:
             try:
@@ -878,6 +887,8 @@ class MainWindow(QMainWindow):
                 break
     def _delete_chat_by_id(self, cid: str) -> None:
         storage.delete_chat(cid)
+        # Clear token tracking data for this chat
+        self._token_tracker.clear_chat(cid)
         if self._current_chat == cid:
             # Stop typing animation/timers and hide indicator
             try:
@@ -2067,6 +2078,9 @@ class MainWindow(QMainWindow):
             return
         self.entry.clear()
         now_iso = datetime.now().isoformat()
+        # Start token tracking for this request
+        self._pending_request_id = self._cli.send_prompt(txt, origin_cid)
+        # For user messages, estimate tokens initially (will be refined by tracker)
         tok_user = None
         try:
             tok_user = int(estimate_tokens(txt))
@@ -2171,6 +2185,13 @@ class MainWindow(QMainWindow):
             dlg.chatSettingsSaved.connect(self._on_chat_settings_saved)
         except Exception:
             pass
+        self._load_chats()
+        # Check if all chats were deleted and reset context usage if needed
+        self._check_and_reset_context_usage()
+        try:
+            self._update_token_warning()
+        except Exception:
+            pass
         dlg.exec()
         try:
             self._update_token_warning()
@@ -2209,6 +2230,68 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _setup_token_tracking(self) -> None:
+        """Initialize token tracking system integration."""
+        pass
+    
+    def _on_token_metrics_update(self, chat_id: str, metrics: TokenMetrics) -> None:
+        """Handle real-time token metrics updates from the token tracker."""
+        if chat_id == self._current_chat:
+            try:
+                self._update_token_warning()
+            except Exception:
+                pass
+    
+    def _get_accurate_token_count(self, chat_id: str) -> int:
+        """Get accurate token count using the token tracker."""
+        if chat_id:
+            return self._token_tracker.get_chat_total_tokens(chat_id)
+        return 0
+    
+    def _calculate_bubble_tokens_sum(self) -> int:
+        """Calculate sum of all individual chat bubble token counts."""
+        total = 0
+        try:
+            for i in range(self.chat._v.count()):
+                item = self.chat._v.itemAt(i)
+                widget = item.widget() if item else None
+                if isinstance(widget, QFrame):
+                    layout = widget.layout()
+                    if isinstance(layout, QHBoxLayout):
+                        for j in range(layout.count()):
+                            child_widget = layout.itemAt(j).widget()
+                            if isinstance(child_widget, Bubble):
+                                token_count = getattr(child_widget, '_token_count', None)
+                                if isinstance(token_count, int) and token_count > 0:
+                                    total += token_count
+        except Exception:
+            pass
+        return total
+    
+    def _check_and_reset_context_usage(self) -> None:
+        """Check if all chats are deleted and reset context usage to 0."""
+        try:
+            # Check if chat list is empty and no current chat is selected
+            has_chats = self.list.count() > 0
+            has_current = self._current_chat is not None
+            
+            if not has_chats and not has_current:
+                # All chats deleted - clear token tracker and reset UI
+                self._token_tracker.clear_all()
+                self._messages.clear()
+                # Force context usage to show 0
+                try:
+                    text_lbl = getattr(self, '_ctx_text', None)
+                    bar = getattr(self, '_ctx_bar', None)
+                    if text_lbl and bar:
+                        text_lbl.setText("Context usage (0/4,096 tokens):")
+                        bar.set_value(0)
+                        bar.setVisible(True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _update_token_warning(self) -> None:
         lbl = getattr(self, '_token_label', None)
         row = getattr(self, '_ctx_row', None)
@@ -2222,13 +2305,13 @@ class MainWindow(QMainWindow):
         except Exception:
             debug = False
         try:
-            enabled = bool(storage.get_bool('context_warn_enabled', False))
+            enabled = bool(storage.get_bool('context_warn_enabled', True))  # Enable by default for token sync
         except Exception:
-            enabled = False
+            enabled = True
         try:
             max_tokens = int(storage.get_int('context_max_tokens', 4096))
         except Exception:
-            max_tokens = 0
+            max_tokens = 4096
         try:
             threshold_pct = int(storage.get_int('context_warn_threshold_pct', 80))
         except Exception:
@@ -2249,21 +2332,22 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             return
-        msgs = list(getattr(self, '_messages', []))
-        try:
-            used = int(estimate_messages_tokens(msgs))
-        except Exception:
-            used = 0
+        # Use sum of chat bubble token counts for perfect synchronization
+        used = self._calculate_bubble_tokens_sum()
+        
+        # If no bubble tokens available, fall back to message estimation
+        if used == 0:
+            msgs = list(getattr(self, '_messages', []))
+            try:
+                used = int(estimate_messages_tokens(msgs))
+            except Exception:
+                used = 0
+        
         try:
             pct = int((used / float(max_tokens)) * 100) if max_tokens > 0 else 0
         except Exception:
             pct = 0
         show = pct >= int(threshold_pct)
-        if debug:
-            try:
-                print(f"[ctx] used={used} max={max_tokens} pct={pct} thr={threshold_pct} show_lbl={show} msgs={len(msgs)}")
-            except Exception:
-                pass
         if show:
             try:
                 lbl.setText(f"Context {pct}% of {max_tokens}")
@@ -2358,6 +2442,13 @@ class MainWindow(QMainWindow):
                         try:
                             self._messages.append({'role':'assistant','content':s,'ts':state['iso']})
                             storage.save_messages(self._current_chat, self._messages)
+                            # Update bubble with accurate token count from tracker if available
+                            if hasattr(state, 'bubble') and state['bubble']:
+                                metrics = self._token_tracker.get_chat_metrics(self._current_chat)
+                                if metrics:
+                                    latest_metrics = metrics[-1]  # Most recent inference
+                                    accurate_tokens = latest_metrics.output_tokens + latest_metrics.reasoning_tokens
+                                    state['bubble'].set_token_count(accurate_tokens)
                         except Exception:
                             pass
                     # Unconditional final scroll to bottom after AI message completes
@@ -2385,6 +2476,7 @@ class MainWindow(QMainWindow):
                     pass
                 try:
                     cur = state['bubble'].text()
+                    # Use estimated tokens during typing, will be updated with accurate count when complete
                     tok = int(estimate_tokens(cur))
                     state['bubble'].set_token_count(tok)
                 except Exception:
