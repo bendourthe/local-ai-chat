@@ -488,7 +488,7 @@ QPushButton#SendButton { background-color: %(SEND_BG)s; color:%(TEXT_PRIMARY)s; 
 QPushButton#SendButton:hover { background-color: %(SEND_HOVER)s; }
 QPushButton#SendButton[active="true"] { background-color: %(SEND_ACTIVE)s; color:%(TEXT_PRIMARY)s; }
 /* Icon-only QToolButton variant used in input bar */
-QToolButton#SendButton { background-color: %(SEND_BG)s; color:#FFFFFF; border: 0px; }
+QToolButton#SendButton { background-color: %(SEND_BG)s; color:#FFFFFF; border: 0px; border-radius: 10px; }
 QToolButton#SendButton:hover { background-color: %(SEND_HOVER)s; }
 QToolButton#SendButton[active="true"] { background-color: %(SEND_ACTIVE)s; }
 QToolButton#SendButton[active="true"]:hover { background-color: %(SEND_ACTIVE)s; }

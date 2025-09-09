@@ -205,6 +205,74 @@ class TokenTracker:
             return {cid: sum(m.total_tokens for m in metrics) 
                    for cid, metrics in self._chat_tokens.items()}
     
+    def check_context_limit(self, chat_id: str, new_message: str, 
+                            max_tokens: int = 4096) -> bool:
+        """Check if adding message would exceed context limit."""
+        current = self.get_chat_total_tokens(chat_id)
+        new_tokens = self._estimate_input_tokens(new_message, chat_id)
+        return (current + new_tokens) < max_tokens
+    
+    def get_optimal_context_window(self, chat_id: str, messages: List[Dict],
+                                   max_tokens: int = 4096) -> List[Dict]:
+        """Return messages that fit within token limit using intelligent selection."""
+        from .context_manager import ContextManager
+        
+        # Use context manager for intelligent message selection
+        context_mgr = ContextManager(max_tokens=max_tokens)
+        return context_mgr.truncate_messages(messages)
+    
+    def estimate_conversation_tokens(self, messages: List[Dict]) -> int:
+        """Estimate total tokens for a conversation including overhead."""
+        if not messages:
+            return 0
+            
+        # Calculate base tokens for all messages
+        base_tokens = 0
+        for msg in messages:
+            content = msg.get('content', '')
+            base_tokens += self._estimate_output_tokens(content)
+        
+        # Add system overhead (prompts, formatting, etc.)
+        system_overhead = 150  # Typical system prompt and formatting overhead
+        
+        # Add conversation context overhead (increases with length)
+        context_overhead = min(200, len(messages) * 5)  # 5 tokens per message overhead
+        
+        return base_tokens + system_overhead + context_overhead
+    
+    def get_context_usage_stats(self, chat_id: str, max_tokens: int = 4096) -> Dict[str, Any]:
+        """Get detailed context usage statistics for a chat."""
+        with self._lock:
+            total_tokens = self.get_chat_total_tokens(chat_id)
+            usage_percent = (total_tokens / max_tokens) * 100.0
+            
+            metrics_list = self._chat_tokens.get(chat_id, [])
+            
+            stats = {
+                'total_tokens': total_tokens,
+                'max_tokens': max_tokens,
+                'usage_percent': usage_percent,
+                'available_tokens': max(0, max_tokens - total_tokens),
+                'message_count': len(metrics_list),
+                'average_tokens_per_exchange': 0,
+                'recent_trend': 'stable'
+            }
+            
+            if metrics_list:
+                stats['average_tokens_per_exchange'] = total_tokens / len(metrics_list)
+                
+                # Calculate recent trend (last 3 vs previous 3 exchanges)
+                if len(metrics_list) >= 6:
+                    recent_avg = sum(m.total_tokens for m in metrics_list[-3:]) / 3
+                    previous_avg = sum(m.total_tokens for m in metrics_list[-6:-3]) / 3
+                    
+                    if recent_avg > previous_avg * 1.2:
+                        stats['recent_trend'] = 'increasing'
+                    elif recent_avg < previous_avg * 0.8:
+                        stats['recent_trend'] = 'decreasing'
+            
+            return stats
+    
     def _estimate_input_tokens(self, user_input: str, chat_id: str) -> int:
         """
         Estimate input tokens including conversation context.

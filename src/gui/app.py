@@ -1,6 +1,6 @@
 from collections import deque
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import re
 import threading
 import os
@@ -17,6 +17,7 @@ from core.foundry_cli import FoundryCLI
 from core import storage
 from core.tokens import estimate_messages_tokens, estimate_tokens
 from core.token_tracker import get_token_tracker, TokenMetrics
+from core.context_manager import ContextManager
 
 class _ContextProgressBar(QWidget):
     """Compact horizontal progress bar with a vertical threshold indicator."""
@@ -157,6 +158,32 @@ class MainWindow(QMainWindow):
         self._gpu_debug = deque(maxlen=12)
         self._model_probe_started: bool = False
         self._startup_probe_done: bool = False
+        
+        # Context management and idle detection
+        max_tokens = storage.get_int('context_window_tokens', 4096)
+        reserve_tokens = storage.get_int('context_reserve_tokens', 512)
+        self._context_mgr = ContextManager(max_tokens=max_tokens, reserve_tokens=reserve_tokens)
+        
+        self._idle_timer = QTimer(self)
+        self._idle_timer.timeout.connect(self._on_idle_timeout)
+        idle_minutes = storage.get_int('idle_timeout_minutes', 5)
+        self._idle_timer.setInterval(idle_minutes * 60000)  # Convert to milliseconds
+        self._idle_timer.setSingleShot(False)
+        self._user_activity_time = datetime.now()
+        
+        # Enable optimizations based on settings
+        self._enable_auto_unload = storage.get_bool('enable_auto_unload', True)
+        self._enable_context_truncation = storage.get_bool('enable_context_truncation', True)
+        self._enable_summarization = storage.get_bool('enable_summarization', True)
+        
+        # Setup GPU monitoring
+        try:
+            self._cli.setup_gpu_monitoring(
+                threshold_mb=storage.get_int('gpu_memory_threshold_mb', 2048),
+                on_threshold_exceeded=self._on_gpu_threshold_exceeded
+            )
+        except Exception:
+            pass
         def _apply_small_shadow(w):
             """Apply a small drop shadow to a widget."""
             eff = QGraphicsDropShadowEffect(self)
@@ -434,6 +461,11 @@ class MainWindow(QMainWindow):
                 if e.key() in (Qt.Key_Return, Qt.Key_Enter) and not (e.modifiers() & Qt.ShiftModifier):
                     e.accept(); self.submit.emit(); return
                 return super().keyPressEvent(e)
+            def focusInEvent(self, e):
+                # Reset idle timer on user activity
+                if hasattr(self.parent(), '_reset_idle_timer'):
+                    self.parent()._reset_idle_timer()
+                return super().focusInEvent(e)
         self.entry = _SendTextEdit()
         self.entry.submit.connect(self._send)
         self.entry.textChanged.connect(self._on_entry_changed)
@@ -455,7 +487,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         # Colors come from QSS; only set dynamic radius/padding at runtime
-        self.send_btn.setStyleSheet("QToolButton#SendButton { border: 0px; border-radius: 15px; padding: 6px; }")
+        # Let QSS theme handle styling including hover effects
         _apply_small_shadow(self.send_btn)
         in_h.addWidget(self.send_btn, 0)
         try:
@@ -670,8 +702,34 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._typing = None
-        self._current_chat = cid
-        self._messages = data.get('messages', [])
+        
+        # Handle context management when switching chats
+        if self._current_chat != cid:
+            # Stop current session
+            self._cli.stop_chat()
+            self._chat_started = False
+            
+            # Load new chat data
+            self._current_chat = cid
+            self._messages = data.get('messages', [])
+            
+            # Restart with full context if model is selected and messages exist
+            if self._model and self._messages:
+                try:
+                    self._cli.restart_with_context(
+                        self._model, 
+                        self._messages,
+                        on_raw_output=lambda s: self._bridge.raw.emit(s),
+                        on_assistant=lambda s: self._bridge.assistant.emit(s)
+                    )
+                    self._chat_started = True
+                except Exception:
+                    # Fallback to regular start if restart fails
+                    pass
+        else:
+            self._current_chat = cid
+            self._messages = data.get('messages', [])
+            
         self.chat._v.setEnabled(False)
         while self.chat._v.count() > 1:
             w = self.chat._v.itemAt(0).widget()
@@ -721,6 +779,69 @@ class MainWindow(QMainWindow):
         try:
             QTimer.singleShot(0, _defer_ctx_sel)
             QTimer.singleShot(50, _defer_ctx_sel)
+        except Exception:
+            pass
+
+    def _reset_idle_timer(self) -> None:
+        """Reset the idle timer when user activity is detected."""
+        self._user_activity_time = datetime.now()
+        if self._enable_auto_unload:
+            self._idle_timer.stop()
+            self._idle_timer.start()
+    
+    def _on_idle_timeout(self) -> None:
+        """Handle idle timeout - unload model after idle period."""
+        try:
+            if self._enable_auto_unload and self._cli.is_model_loaded():
+                self._cli.unload_model()
+                self._set_status("Model unloaded due to inactivity")
+        except Exception:
+            pass
+    
+    def update_optimization_settings(self):
+        """Update optimization settings from storage and apply them."""
+        try:
+            # Update context management settings
+            max_tokens = storage.get_int('context_window_tokens', 4096)
+            reserve_tokens = storage.get_int('context_reserve_tokens', 512)
+            self._context_mgr = ContextManager(max_tokens=max_tokens, reserve_tokens=reserve_tokens)
+            
+            # Update idle timer
+            idle_minutes = storage.get_int('idle_timeout_minutes', 5)
+            self._idle_timer.setInterval(idle_minutes * 60000)
+            
+            # Update optimization flags
+            self._enable_auto_unload = storage.get_bool('enable_auto_unload', True)
+            self._enable_context_truncation = storage.get_bool('enable_context_truncation', True)
+            self._enable_summarization = storage.get_bool('enable_summarization', True)
+            
+            # Update GPU monitoring threshold
+            if hasattr(self._cli, 'setup_gpu_monitoring'):
+                threshold_mb = storage.get_int('gpu_memory_threshold_mb', 2048)
+                self._cli.setup_gpu_monitoring(
+                    threshold_mb=threshold_mb,
+                    on_threshold_exceeded=self._on_gpu_threshold_exceeded
+                )
+        except Exception:
+            pass
+
+    def _on_gpu_threshold_exceeded(self, gpu_info):
+        """Handle GPU memory threshold exceeded."""
+        try:
+            if self._cli.is_model_loaded():
+                self._cli.unload_model()
+                self._chat_started = False
+                self._set_status(f"Model unloaded (GPU memory: {gpu_info.used_mb}MB)")
+        except Exception:
+            pass
+
+    def _set_status(self, message: str) -> None:
+        """Set status message in the UI."""
+        try:
+            # Update device label to show status
+            self.device_value_label.setText(message)
+            # Auto-clear after 5 seconds
+            QTimer.singleShot(5000, lambda: self._update_device_label())
         except Exception:
             pass
     def _new_chat(self) -> None:
@@ -2009,13 +2130,14 @@ class MainWindow(QMainWindow):
                         self._send_btn_base_h = one_line_h + btn_extra
                     if new_h <= one_line_h + 2:
                         self._send_btn_base_h = one_line_h + btn_extra
-                    btn_h = int(self._send_btn_base_h)
+                    btn_h = int(self._send_btn_base_h) - 2
                     pad_px = 10
                     icon_side = max(12, int(btn_h*0.4))
                     self.send_btn.setFixedSize(btn_h, btn_h)
                     self.send_btn.setIconSize(QSize(icon_side, icon_side))
                     try:
-                        self.send_btn.setStyleSheet(f"QToolButton#SendButton {{ border: 0px; border-radius: {btn_h//2}px; padding: {pad_px}px; }}")
+                        # Dynamic sizing handled by QSS theme
+                        pass
                     except Exception:
                         pass
                 except Exception:
@@ -2029,7 +2151,7 @@ class MainWindow(QMainWindow):
                     btn_extra = 14
                     if not hasattr(self, '_send_btn_base_h') or self._send_btn_base_h is None:
                         self._send_btn_base_h = one_line_h + btn_extra
-                    btn_h = int(self._send_btn_base_h)
+                    btn_h = int(self._send_btn_base_h) - 2
                     pad_px = 10
                     icon_side = max(12, int(btn_h*0.4))
                     self.send_btn.setFixedSize(btn_h, btn_h)
@@ -2078,8 +2200,58 @@ class MainWindow(QMainWindow):
             return
         self.entry.clear()
         now_iso = datetime.now().isoformat()
-        # Start token tracking for this request
-        self._pending_request_id = self._cli.send_prompt(txt, origin_cid)
+        
+        # Reset idle timer on user activity
+        self._reset_idle_timer()
+        
+        # Check context limits and apply optimizations
+        if self._enable_context_truncation:
+            # Check if adding this message would exceed context limits
+            max_tokens = storage.get_int('context_window_tokens', 4096)
+            if not self._token_tracker.check_context_limit(origin_cid, txt, max_tokens):
+                # Context limit would be exceeded, apply truncation
+                if self._enable_summarization and self._context_mgr.should_summarize(self._messages):
+                    # Summarize and truncate the conversation
+                    optimized_messages = self._context_mgr.truncate_messages(self._messages + [{'role': 'user', 'content': txt, 'ts': now_iso}])
+                    
+                    # If significant truncation occurred, restart with context
+                    if len(optimized_messages) < len(self._messages) - 2:  # Allow for some normal truncation
+                        try:
+                            self._cli.restart_with_context(
+                                self._model,
+                                optimized_messages,
+                                on_raw_output=lambda s: self._bridge.raw.emit(s),
+                                on_assistant=lambda s: self._bridge.assistant.emit(s)
+                            )
+                            # Update local message history to match
+                            self._messages = optimized_messages[:-1]  # Exclude the new user message
+                            self._set_status("Context optimized")
+                        except Exception:
+                            pass
+        
+        # Ensure chat is started before sending prompt
+        if not self._chat_started or not self._cli.is_model_loaded():
+            try:
+                self._cli.start_chat(self._model, 
+                    on_raw_output=lambda s: self._bridge.raw.emit(s),
+                    on_assistant=lambda s: self._bridge.assistant.emit(s))
+                self._chat_started = True
+                
+                # If we have previous context, restart with it
+                if self._messages:
+                    self._cli.restart_with_context(self._model, self._messages + [{'role': 'user', 'content': txt, 'ts': now_iso}],
+                        on_raw_output=lambda s: self._bridge.raw.emit(s),
+                        on_assistant=lambda s: self._bridge.assistant.emit(s))
+                    # Skip sending the prompt since restart_with_context handles it
+                    self._pending_request_id = f"restart_{origin_cid}_{int(time.time())}"
+                else:
+                    # No previous context, just send the prompt
+                    self._pending_request_id = self._cli.send_prompt(txt, origin_cid)
+            except Exception:
+                self._pending_request_id = self._cli.send_prompt(txt, origin_cid)
+        else:
+            # Chat already started, just send the prompt
+            self._pending_request_id = self._cli.send_prompt(txt, origin_cid)
         # For user messages, estimate tokens initially (will be refined by tracker)
         tok_user = None
         try:

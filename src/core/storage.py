@@ -305,13 +305,30 @@ def migrate_downloaded_aliases(pairs: List[Tuple[str, str]]) -> None:
 # ---- App settings (generic key/value persisted in settings.json) ----
 
 def _default_settings() -> Dict:
-    """Return default application settings."""
+    """Return default application settings with performance optimizations."""
     return {
         'chat_show_timestamp': True,
         'chat_show_role': True,
         'context_warn_enabled': True,
         'context_max_tokens': 4096,
         'context_warn_threshold_pct': 85,
+        # GPU memory management settings
+        'gpu_memory_threshold_mb': 6000,  # Adjusted for 20B model
+        'idle_timeout_minutes': 5,
+        'enable_auto_unload': True,
+        'memory_cleanup_aggressive': True,  # NEW: Force aggressive cleanup
+        # Context window management settings
+        'enable_summarization': True,
+        'context_window_tokens': 4096,
+        'context_reserve_tokens': 512,
+        'context_cache_size': 10,  # NEW: Limit context cache size
+        # Performance optimization settings
+        'quantization_bits': 8,  # Use 8-bit quantization for memory efficiency
+        'max_cached_sessions': 3,
+        'enable_context_truncation': True,
+        'enable_gpu_monitoring': True,
+        'subprocess_timeout_seconds': 30,  # NEW: Prevent hanging
+        'enable_memory_profiling': True,  # NEW: Track memory usage
     }
 
 def _read_settings() -> Dict:
