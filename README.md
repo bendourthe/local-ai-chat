@@ -1,14 +1,22 @@
 # Foundry Local Desktop Chat (Windows)
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue)
+![Version](https://img.shields.io/badge/version-0.2.1-blue)
 
-Version: 0.2.0
+Version: 0.2.1
 
 A simple Windows desktop app (PySide6/Qt) to manage Microsoft Foundry Local:
 - Install Foundry Local via winget
 - List available models
 - Select a model and chat with clean, readable streaming
 - Persist chats in a sidebar (load, rename, delete)
+
+## What's New in 0.2.1
+- **Context Management System**: New ContextManager class for intelligent conversation context handling within token limits, implementing truncation and summarization strategies
+- **GPU Memory Monitoring**: Advanced GPUMonitor class for real-time memory usage tracking with automatic cleanup when thresholds are exceeded
+- **Enhanced Session Tracking**: FoundryCLI improvements with session management, memory monitoring, and chat session attributes for better resource control
+- **Memory Management Settings**: Updated configuration options for GPU memory thresholds and context window management
+- **Comprehensive Test Suite**: Robust testing framework for context retention and GPU memory usage to ensure performance and reliability
+- **Improved Error Handling**: Enhanced error management and user experience across chat operations and settings management
 
 ## What's New in 0.2.0
 - **Typing Indicators**: Real-time typing animations while waiting for assistant responses with smart debounce logic

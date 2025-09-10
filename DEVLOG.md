@@ -1,5 +1,17 @@
 # Task List
 
+## Completed in v0.2.1
+- [x] Implement ContextManager class for intelligent conversation context handling
+- [x] Add GPUMonitor class for real-time memory usage tracking and cleanup
+- [x] Enhance FoundryCLI with session tracking and memory management
+- [x] Update storage settings for GPU memory thresholds and context windows
+- [x] Create comprehensive test framework for context retention and GPU memory
+- [x] Fix test suite execution issues (Context Retention and Response Performance 0/0 → 7/7)
+- [x] Add TestResultAggregator proper constructor calls and result collection
+- [x] Implement emergency cleanup system with process management and signal handlers
+- [x] Add timeout decorators and proper cleanup mechanisms for test reliability
+- [x] Fix format_console_output parameter order and missing configuration keys
+
 ## Completed in v0.2.0
 - [x] Fix model selector dropdown population on startup
 - [x] Modernize Settings dialog (tabs, scrollbar, color pickers alignment) 
@@ -43,6 +55,38 @@
 - QSS targeting: Used `objectName` (`SettingsScroll`) to scope scrollbar styling to the settings page without affecting chat.
 - Label wrapping: Chose `QFormLayout.WrapLongRows` plus measured minimum width and constrained editor width to minimize truncation while maintaining alignment.
 - Packaging: Minimal `pyproject.toml` with setuptools for future-ready metadata without restructuring to a fully installable package yet.
+
+## v0.2.1 Major Features Added
+
+### Context Management System
+- New ContextManager class for intelligent conversation context handling within token limits
+- Truncation and summarization strategies for optimal memory usage
+- Token limit enforcement with configurable thresholds
+- Integration with chat sessions for persistent context tracking
+
+### GPU Memory Monitoring
+- GPUMonitor class for real-time memory usage tracking
+- Automatic cleanup triggers when thresholds are exceeded  
+- Memory baseline tracking and delta calculations
+- Integration with FoundryCLI for session-aware memory management
+
+### Enhanced Session Tracking
+- FoundryCLI improvements with chat session management attributes
+- Memory baseline tracking (`_memory_baseline`) and process cleanup locks
+- Context caching (`_context_cache`) for efficient memory usage
+- Session isolation and proper cleanup mechanisms
+
+### Comprehensive Test Framework
+- Full test suites for context retention, GPU memory usage, and response performance
+- Timeout handling with 120-second limits and proper cleanup
+- Test result aggregation with accurate reporting (fixed 0/0 → 7/7 test counts)
+- Emergency cleanup system with process management and signal handlers
+
+### Technical Infrastructure
+- Non-blocking I/O handlers to prevent hanging during model operations
+- Thread-safe unload_model() with comprehensive GPU memory cleanup
+- Enhanced send_prompt() with intelligent context building
+- Proper test runner functions for result collection and aggregation
 
 ## v0.2.0 Major Features Added
 

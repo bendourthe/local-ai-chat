@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.2.1] - 2025-09-09
+
+### Added
+- **ContextManager Class**: New intelligent conversation context management system with token limit enforcement, truncation strategies, and automatic summarization
+- **GPUMonitor Class**: Advanced GPU memory monitoring with real-time usage tracking, threshold-based alerts, and automatic cleanup triggers
+- **Enhanced Session Tracking**: FoundryCLI improvements with chat session management, memory baseline tracking, and process cleanup locks
+- **Memory Management Settings**: Configurable GPU memory thresholds, context window limits, and cleanup strategies in storage settings
+- **Comprehensive Test Framework**: Full test suites for context retention, GPU memory usage, and response performance with timeout handling
+- **Test Result Aggregation**: Proper test execution reporting and result collection across all test suites
+- **Emergency Cleanup System**: Process management with signal handlers and orphaned process cleanup for test reliability
+
+### Enhanced
+- FoundryCLI with session tracking attributes (`_chat_sessions`, `_memory_baseline`, `_context_cache`)
+- Test suite execution with proper timeout decorators and cleanup mechanisms
+- Error handling across chat operations, memory management, and test execution
+- GPU memory cleanup with aggressive cache clearing and process termination
+- Context retention testing with isolation verification and restoration accuracy
+
+### Fixed
+- Test suite execution issues where Context Retention and Response Performance suites reported 0/0 tests executed
+- TestResultAggregator constructor calls missing required `suite_name` parameter
+- format_console_output parameter order errors causing AttributeError during test display
+- Missing test configuration keys for Response Performance suite
+- Test runner functions for proper result collection and aggregation
+
+### Technical
+- Added non-blocking I/O handlers to prevent hanging during model operations
+- Implemented thread-safe unload_model() with comprehensive GPU memory cleanup
+- Enhanced send_prompt() with intelligent context building and session management
+- Added memory monitoring initialization with baseline tracking in start_chat()
+- Created test timeout decorators with 120-second limits and proper cleanup
+
 ## [0.2.0] - 2025-08-28
 
 ### Added
